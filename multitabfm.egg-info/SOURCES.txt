@@ -1,0 +1,7 @@
+README.md
+pyproject.toml
+multitabfm.egg-info/PKG-INFO
+multitabfm.egg-info/SOURCES.txt
+multitabfm.egg-info/dependency_links.txt
+multitabfm.egg-info/requires.txt
+multitabfm.egg-info/top_level.txt
