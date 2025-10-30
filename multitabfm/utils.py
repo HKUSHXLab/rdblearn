@@ -58,34 +58,3 @@ def prepare_target_dataframes(train_data: pd.DataFrame, test_data: pd.DataFrame,
     test_df[target_column] = test_data[target_column]
     
     return train_df, test_df
-
-
-def get_default_configs() -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Get default DFS and model configurations based on ag_dfs_experiment.py.
-    
-    Returns:
-        Tuple of (dfs_config, model_config)
-    """
-    dfs_config = {
-        "max_depth": 3,
-        "engine": "dfs2sql",
-        "agg_primitives": ["max", "min", "mean", "count", "mode"]
-    }
-    
-    model_config = {
-        "hyperparameters": {
-            "TABPFNV2": { 
-                "random_state": 42,
-                "n_estimators": 8,
-                "inference_config": {"SUBSAMPLE_SAMPLES": 10000},
-                "ignore_pretraining_limits": True,
-                "ag.max_rows": 20000,
-                "ag.max_features": 600
-            }
-        },
-        "ag_args_fit": {"ag.max_memory_usage_ratio": 1.2},
-        "num_bag_folds": 0,
-        "num_stack_levels": 0,
-    }
-    
-    return dfs_config, model_config
