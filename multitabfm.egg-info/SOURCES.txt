@@ -12,3 +12,7 @@ multitabfm.egg-info/SOURCES.txt
 multitabfm.egg-info/dependency_links.txt
 multitabfm.egg-info/requires.txt
 multitabfm.egg-info/top_level.txt
+tests/test_evaluation.py
+tests/test_feature_engineer.py
+tests/test_model.py
+tests/test_utils.py

@@ -59,10 +59,6 @@ testing = [
     "pytest-cov>=4.0.0",
 ]
 
-# All optional dependencies
-all = [
-    "multitabfm[dev]",
-]
 
 [project.urls]
 Homepage = "https://github.com/your-username/multitabfm"
@@ -73,7 +69,6 @@ Repository = "https://github.com/your-username/multitabfm.git"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["multitabfm*"]
-exclude = ["tests*", "__pycache__*"]
 
 [tool.setuptools.package-data]
 multitabfm = ["py.typed"]
@@ -81,26 +76,11 @@ multitabfm = ["py.typed"]
 [tool.black]
 line-length = 100
 target-version = ['py38']
-include = '\.pyi?$'
-extend-exclude = '''
-/(
-  # directories
-  \.eggs
-  | \.git
-  | \.hg
-  | \.mypy_cache
-  | \.tox
-  | \.venv
-  | build
-  | dist
-)/
-'''
+
 
 [tool.isort]
 profile = "black"
-multi_line_output = 3
 line_length = 100
-known_first_party = ["multitabfm"]
 
 [tool.mypy]
 python_version = "3.8"

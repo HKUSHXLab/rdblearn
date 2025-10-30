@@ -19,11 +19,11 @@ class MultiTabFM:
         """Fit the model on feature-augmented training data."""
         return self.model_adapter.fit(train_features, label_column, model_config)
 
-    def predict_proba(self, test_features: pd.DataFrame) -> np.ndarray:
+    def predict_proba(self, test_features: pd.DataFrame) -> pd.DataFrame:
         proba = self.model_adapter.predict_proba(test_features)
         return proba
 
-    def evaluate(self, labels: pd.Series, proba: np.ndarray, metrics: Optional[List[str]] = None) -> dict:
+    def evaluate(self, labels: pd.Series, proba: Union[pd.DataFrame, np.ndarray], metrics: Optional[List[str]] = None) -> dict:
         """Evaluate predictions against true labels."""
         return compute_metrics(labels, proba, metrics)
 
