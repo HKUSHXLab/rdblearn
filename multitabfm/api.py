@@ -16,9 +16,9 @@ __all__ = [
 
 
 def train_and_predict(
-    *,
     rdb_data_path: str,
     task_data_path: str,
+    enable_dfs: Optional[bool] = True,
     dfs_config: Optional[dict] = None,
     model_config: Optional[dict] = None,
     eval_metrics: Optional[List[str]] = None,
@@ -28,6 +28,7 @@ def train_and_predict(
     Args:
         rdb_data_path: Path to the RDB data directory (e.g., "data/rel-event")
         task_data_path: Path to the task data directory (e.g., "data/rel-event/user-ignore")
+        enable_dfs: Whether to enable deep feature synthesis to augment features
         dfs_config: Optional DFS configuration dict
         model_config: Optional model configuration dict
         eval_metrics: Optional list of metric names to compute on predictions
@@ -37,11 +38,10 @@ def train_and_predict(
         available in the test set, metrics will be a dict; otherwise None.
     """
     engine = MultiTabFM(dfs_config=dfs_config, model_config=model_config)
-    proba, metrics = engine.train_and_predict(
+    preds, metrics = engine.train_and_predict(
         rdb_data_path=rdb_data_path,
         task_data_path=task_data_path,
-        dfs_config=dfs_config,
-        model_config=model_config,
+        enable_dfs=enable_dfs,
         eval_metrics=eval_metrics,
     )
-    return proba, metrics
+    return preds, metrics

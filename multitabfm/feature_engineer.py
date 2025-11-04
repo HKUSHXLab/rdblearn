@@ -1,9 +1,16 @@
-from typing import Optional
+from typing import Optional, Union
 import pandas as pd
 from fastdfs.api import compute_dfs_features
+from fastdfs.dfs import DFSConfig
 
     
-def generate_features(target_df: pd.DataFrame, rdb, key_mappings: dict, time_column: str, dfs_config: Optional[dict] = None) -> pd.DataFrame:
+def generate_features(
+    target_df: pd.DataFrame,
+    rdb,
+    key_mappings: dict,
+    time_column: str,
+    dfs_config: Optional[Union[dict, DFSConfig]] = None,
+) -> pd.DataFrame:
     """Generate DFS features using fastdfs.api.compute_dfs_features.
     
     Args:

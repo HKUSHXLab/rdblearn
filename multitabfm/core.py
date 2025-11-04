@@ -5,42 +5,42 @@ import numpy as np
 from .feature_engineer import generate_features
 from .model import AGAdapter
 from .evaluation import compute_metrics
-from .utils import load_dataset, prepare_target_dataframes
+from .utils import load_dataset
 
 class MultiTabFM:
     """Simplified multi-table feature modeling framework."""
     
-    def __init__(self, dfs_config: Optional[dict] = None, model_config: Optional[dict] = None):
-        self.dfs_config = dfs_config or {}
+    def __init__(self, dfs_config: Optional[dict] = None,model_config: Optional[dict] = None):
         self.model_config = model_config or {}
-        self.model_adapter = AGAdapter()
+        self.dfs_config = dfs_config or {}
+        self.model_adapter = AGAdapter(model_config)
 
-    def fit(self, train_features: pd.DataFrame, label_column: str, model_config: Optional[dict] = None) -> None:
+    def fit(self, train_features: pd.DataFrame, label_column: str, task_type: str) -> None:
         """Fit the model on feature-augmented training data."""
-        return self.model_adapter.fit(train_features, label_column, model_config)
+        return self.model_adapter.fit(train_features, label_column, task_type)
 
     def predict_proba(self, test_features: pd.DataFrame) -> pd.DataFrame:
         proba = self.model_adapter.predict_proba(test_features)
         return proba
 
-    def evaluate(self, labels: pd.Series, proba: Union[pd.DataFrame, np.ndarray], metrics: Optional[List[str]] = None) -> dict:
-        """Evaluate predictions against true labels."""
-        return compute_metrics(labels, proba, metrics)
+    def predict(self, test_features: pd.DataFrame) -> pd.Series:
+        return self.model_adapter.predict(test_features)
+
+    def evaluate(self, labels: pd.Series, preds_or_proba: Union[pd.DataFrame, np.ndarray, pd.Series], metrics: Optional[List[str]] = None) -> dict:
+        """Evaluate predictions against true labels for classification or regression."""
+        return compute_metrics(labels, preds_or_proba, metrics)
 
     def train_and_predict(self,
                          rdb_data_path: str,
                          task_data_path: str,
-                         *,
-                         dfs_config: Optional[dict] = None,
-                         model_config: Optional[dict] = None,
-                         eval_metrics: Optional[List[str]] = None) -> Tuple[Union[pd.DataFrame, np.ndarray], Optional[dict]]:
+                         enable_dfs: bool = True,
+                         eval_metrics: Optional[List[str]] = None) -> Tuple[Union[pd.DataFrame, np.ndarray, pd.Series], Optional[dict]]:
         """Main API: End-to-end training and prediction from data paths.
         
         Args:
             rdb_data_path: Path to RDB data directory (e.g., "data/rel-event")
             task_data_path: Path to task data directory (e.g., "data/rel-event/user-ignore")
-            dfs_config: Optional DFS configuration
-            model_config: Optional model configuration
+            enable_dfs: Whether to enable deep feature synthesis to augment features
             eval_metrics: Optional evaluation metrics
             
         Returns:
@@ -50,29 +50,39 @@ class MultiTabFM:
         # Load dataset
         train_data, test_data, metadata, rdb = load_dataset(rdb_data_path, task_data_path)
         
-        # Prepare target dataframes
-        train_df, test_df = prepare_target_dataframes(train_data, test_data, metadata)
-        
         # Parse metadata
         key_mappings = {k: v for d in metadata['key_mappings'] for k, v in d.items()}
         time_column = metadata['time_column']
         target_column = metadata['target_column']
-        
-        # 1. Generate features
-        train_features = generate_features(train_df, rdb, key_mappings, time_column, dfs_config)
-        test_features = generate_features(test_df, rdb, key_mappings, time_column, dfs_config)
-        
+        # if metadata has task_type, use it; else task_type is None
+        task_type = metadata.get('task_type', None)
+
+        # Prepare target dataframes
+        X_train, Y_train = train_data.drop(columns=[target_column]), train_data[target_column]
+        X_test, Y_test = test_data.drop(columns=[target_column]), test_data[target_column]
+
+        if enable_dfs:
+        # augment features using DFS
+            train_features = generate_features(X_train, rdb, key_mappings, time_column, self.dfs_config)
+            test_features = generate_features(X_test, rdb, key_mappings, time_column, self.dfs_config)
+        else:
+            train_features = X_train
+            test_features = X_test
+        train_data = pd.concat([train_features, Y_train], axis=1)
+
         # 2. Train model
-        self.fit(train_features, label_column=target_column, model_config=model_config)
-        
+        self.fit(train_data, label_column=target_column, task_type=task_type)
+
         # 3. Predict
-        proba = self.predict_proba(test_features)
-        
+        if task_type == "regression":
+            preds_or_proba = self.predict(test_features)
+        else:
+            preds_or_proba = self.predict_proba(test_features)
+
         # 4. Evaluate if possible
         metrics = None
-        if eval_metrics and target_column in test_features.columns:
-            labels = test_features[target_column]
-            metrics = self.evaluate(labels, proba, metrics=eval_metrics)
-            
-        return proba, metrics
+        if eval_metrics and Y_test is not None:
+            labels = Y_test
+            metrics = self.evaluate(labels, preds_or_proba, metrics=eval_metrics)
 
+        return preds_or_proba, metrics

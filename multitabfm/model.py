@@ -32,16 +32,27 @@ class ModelPredictor:
         """
         raise NotImplementedError()
 
+    def predict(self, X: pd.DataFrame) -> pd.Series:
+        """Predict target values (for regression) or class labels.
+
+        Default implementation raises. Implement in adapters that support regression.
+
+        Args:
+            X: Feature dataframe
+
+        Returns:
+            Series of predictions.
+        """
+        raise NotImplementedError()
+
 
 class AGAdapter(ModelPredictor):
     """AutoGluon TabularPredictor adapter based on ag_dfs_experiment.py."""
 
-    def __init__(self):
+    def __init__(self, model_config: Optional[dict] = None):
         self.predictor = None
-        
-    def fit(self, X: pd.DataFrame, label_column: str, config: Optional[dict] = None):
-        # Default config based on ag_dfs_experiment.py
-        default_config = {
+        self.problem_type: Optional[str] = None  # 'binary', 'multiclass', 'regression', or None
+        self.model_config = {
             "hyperparameters": {
                 "TABPFNV2": {
                     "random_state": 42,
@@ -51,20 +62,28 @@ class AGAdapter(ModelPredictor):
                         "SUBSAMPLE_SAMPLES": 10000,
                     },
                     "ignore_pretraining_limits": True,
-                    "ag.max_rows": 20000,
-                    "ag.max_features": 600
+                    # Align with test_autogluon to avoid unexpected safety cutoffs
+                    "ag.max_rows": None,
+                    "ag.max_features": None,
+                    "ag.max_memory_usage_ratio": None,
                 }
             },
-            "ag_args_fit": {"ag.max_memory_usage_ratio": 1.2},
             "num_bag_folds": 0,
             "num_bag_sets": None,
             "num_stack_levels": 0,
         }
-        
-        # Update with provided config
-        if config:
-            default_config.update(config)
-            
+        if model_config:
+            # Deep merge dictionaries
+            def deep_merge(d1, d2):
+                for k, v in d2.items():
+                    if k in d1 and isinstance(d1[k], dict) and isinstance(v, dict):
+                        d1[k] = deep_merge(d1[k], v)
+                    else:
+                        d1[k] = v
+                return d1
+            deep_merge(self.model_config, model_config)
+
+    def fit(self, X: pd.DataFrame, label_column: str, task_type):
         # Setup feature generator
         feature_generator = AutoMLPipelineFeatureGenerator(
             enable_datetime_features=True,
@@ -72,19 +91,15 @@ class AGAdapter(ModelPredictor):
             enable_text_special_features=False,
             enable_text_ngram_features=False,
         )
-        
-        
+
         # Create and train predictor
-        self.predictor = TabularPredictor(label=label_column).fit(
-            train_data= X,
+        self.predictor = TabularPredictor(label=label_column, problem_type=task_type).fit(
+            train_data=X,
             feature_generator=feature_generator,
-            **default_config
+            **self.model_config,
         )
     
     def predict_proba(self, X: pd.DataFrame) -> pd.DataFrame:
-        if self.predictor is None:
-            raise RuntimeError("Model not trained. Call fit() first.")
-        
         proba = self.predictor.predict_proba(X)
 
         # Normalize to DataFrame output with class labels as columns
@@ -110,3 +125,13 @@ class AGAdapter(ModelPredictor):
         except Exception:
             class_labels = list(range(n_classes))
         return pd.DataFrame(arr, columns=class_labels)
+
+    def predict(self, X: pd.DataFrame) -> pd.Series:
+        if self.predictor is None:
+            raise RuntimeError("Model not trained. Call fit() first.")
+        # For regression, return numeric predictions; for classification, return class labels
+        preds = self.predictor.predict(X)
+        # Ensure pandas Series output
+        if isinstance(preds, pd.Series):
+            return preds
+        return pd.Series(np.asarray(preds))
