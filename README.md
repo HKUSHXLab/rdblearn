@@ -2,17 +2,24 @@
 
 MultiTabFM is a lightweight multi-table feature modeling framework that pairs Deep Feature Synthesis (DFS) with AutoGluon for end-to-end tabular modeling on relational data.
 
-## Overview
+It is designed to:
+- Provide a compact, friendly API for end-to-end modeling on relational data.
+- Generate features from a relational database (RDB) using DFS (via the `fastdfs` package).
+- Train and predict with AutoGluon Tabular using sensible defaults.
+- Offer both a one-call API for quick results and a step-by-step workflow for more control.
 
-What you get out of the box:
-- DFS-based multi-table feature generation via the local fastdfs package
-- Automated model training and prediction using AutoGluon Tabular
-- A one-call training-and-prediction API and a step-by-step interface
-- Simple evaluation utilities for common metrics (accuracy, roc_auc, logloss)
+## What it Supports
+
+Out of the box, MultiTabFM provides:
+- **DFS-based Feature Generation**: Automatically creates features from multiple tables using Deep Feature Synthesis.
+- **Automated Model Training**: Uses AutoGluon to train tabular models automatically.
+- **One-Call API**: A single function `train_and_predict` for an end-to-end workflow.
+- **Step-by-Step Interface**: Functions for loading data, generating features, and training models separately.
+- **Evaluation Utilities**: Simple tools for calculating common metrics like accuracy, roc_auc, and logloss.
 
 ## Installation
 
-Install in editable mode inside this repository folder:
+Install in editable mode from within the repository folder:
 
 ```bash
 git clone https://github.com/dglai/multitabfm.git
@@ -20,9 +27,66 @@ cd multitabfm
 pip install -e .
 ```
 
-## Quick Start
+## How to Use
 
-### One-call API
+There are two primary ways to use `multitabfm`: the one-call API for simplicity, and the step-by-step API for greater control and introspection.
+
+### Data Layout
+
+Both approaches expect a specific data layout:
+- A directory for the relational database (`rdb_data_path`), readable by `fastdfs.load_rdb`.
+- A directory for the task data (`task_data_path`), containing:
+  - `train.pqt` and `test.pqt`: Parquet files with training and testing data.
+  - `metadata.yaml`: A file describing the dataset, keys, and target for the modeling task.
+
+#### `rdb_data_path` Structure
+
+The `rdb_data_path` is the root directory for your relational dataset. It must contain:
+1.  **`metadata.yaml`**: This file defines the schema of the entire relational database. It specifies the tables, their columns, data types, and relationships.
+2.  **Table Data Files**: These are the actual data files (e.g., `users.parquet`, `items.csv`) for each table listed in the `metadata.yaml`. The `source` field in the metadata for each table points to its corresponding data file within the directory.
+
+An example `metadata.yaml` inside `rdb_data_path` might look like this:
+```yaml
+dataset_name: my_relational_db
+tables:
+  - name: users
+    source: users.parquet
+    format: parquet
+    columns:
+      - name: user_id
+        dtype: primary_key
+      - name: signup_date
+        dtype: datetime_t
+  - name: transactions
+    source: transactions.csv
+    format: csv
+    columns:
+      - name: transaction_id
+        dtype: primary_key
+      - name: user_id
+        dtype: foreign_key
+        link_to: users.user_id
+      - name: amount
+        dtype: float_t
+```
+
+#### `task_data_path` Structure
+
+The `task_data_path` contains the data and metadata for the specific prediction task.
+
+Example of `metadata.yaml` in `task_data_path`:
+```yaml
+dataset_name: rel-event
+key_mappings:
+  - user_id: users.user_id
+  - item_id: items.item_id
+time_column: interaction_time
+target_column: label
+```
+
+### 1. One-Call API (Quick Start)
+
+For a straightforward, end-to-end process, use the `train_and_predict` function. It handles data loading, feature generation, model training, and prediction in a single call.
 
 ```python
 from multitabfm import train_and_predict
@@ -30,14 +94,16 @@ from multitabfm import train_and_predict
 proba, metrics = train_and_predict(
     rdb_data_path="data/rel-event",                 # path used by fastdfs.load_rdb
     task_data_path="data/rel-event/user-ignore",    # must contain train.pqt, test.pqt, metadata.yaml
-    eval_metrics=["accuracy", "roc_auc"],
+    eval_metrics=["accuracy", "auroc"],
 )
 
 print(proba)
 print(metrics)
 ```
 
-### Step-by-step usage
+### 2. Step-by-Step Usage
+
+For more granular control, you can use the core components of the package individually. This is useful for debugging, custom feature engineering, or integrating parts of the workflow into a larger system.
 
 ```python
 import pandas as pd
@@ -80,45 +146,6 @@ if target_column in test_features.columns:
     )
     print(metrics)
 ```
-
-## Data layout and metadata
-
-The step-by-step and one-call flows expect:
-- `rdb_data_path/` readable by `fastdfs.load_rdb`
-- `task_data_path/` containing:
-  - `train.pqt` and `test.pqt` (parquet)
-  - `metadata.yaml` with keys:
-
-```yaml
-dataset_name: rel-event
-key_mappings:
-  - user_id: users.user_id
-  - item_id: items.item_id
-time_column: interaction_time
-target_column: label
-```
-
-## API reference
-
-### Core class: MultiTabFM
-- fit(train_features: pd.DataFrame, label_column: str, model_config: dict | None = None) -> None
-- predict_proba(test_features: pd.DataFrame) -> np.ndarray
-- evaluate(labels: pd.Series, proba: np.ndarray | pd.DataFrame, metrics: list[str] | None = None) -> dict
-- train_and_predict(rdb_data_path: str, task_data_path: str, *, dfs_config: dict | None = None, model_config: dict | None = None, eval_metrics: list[str] | None = None) -> tuple[np.ndarray | pd.DataFrame, dict | None]
-
-### Convenience API
-- train_and_predict(...) — identical to `MultiTabFM.train_and_predict`, exposed at package top-level for one-call use.
-
-### Utilities
-- load_dataset(rdb_data_path: str, task_data_path: str) -> tuple[pd.DataFrame, pd.DataFrame, dict, Any]
-- prepare_target_dataframes(train_data: pd.DataFrame, test_data: pd.DataFrame, metadata: dict) -> tuple[pd.DataFrame, pd.DataFrame]
-- generate_features(target_df: pd.DataFrame, rdb: Any, key_mappings: dict, time_column: str, dfs_config: dict | None = None) -> pd.DataFrame
-- get_default_configs() -> tuple[dict, dict]
-
-### Model adapter
-- AGAdapter — AutoGluon TabularPredictor wrapper used internally by `MultiTabFM`
-
-Supported evaluation metrics: "accuracy", "roc_auc", "logloss".
 
 ## License
 
