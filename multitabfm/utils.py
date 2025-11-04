@@ -1,10 +1,19 @@
 """Utility functions for loading data and running experiments."""
 
-import pandas as pd
-import yaml
 from pathlib import Path
 from typing import Tuple, Optional, Dict, Any
-from fastdfs.api import load_rdb
+
+import numpy as np
+import pandas as pd
+import yaml
+# Note: fastdfs is imported lazily inside load_dataset to avoid import-time dependency
+
+
+def _read_npz_df(file_path: Path) -> pd.DataFrame:
+    """Read a .npz file and convert to DataFrame."""
+    data = np.load(file_path)
+    df = pd.DataFrame({key: data[key] for key in data.files})
+    return df
 
 
 def load_dataset(rdb_data_path: str, task_data_path: str) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any], Any]:
@@ -17,13 +26,29 @@ def load_dataset(rdb_data_path: str, task_data_path: str) -> Tuple[pd.DataFrame,
     Returns:
         Tuple of (train_df, test_df, metadata, rdb)
     """
-    # Load RDB
-    rdb = load_rdb(rdb_data_path)
+    # Load RDB (lazy, dynamic import to avoid static dependency issues)
+    import importlib
+    fastdfs_api = importlib.import_module("fastdfs.api")
+    rdb = fastdfs_api.load_rdb(rdb_data_path)
     
-    # Load task data
+    # Load task data (supports .pqt or .npz)
     task_path = Path(task_data_path)
-    train_df = pd.read_parquet(task_path / "train.pqt")
-    test_df = pd.read_parquet(task_path / "test.pqt")
+    train_pqt = task_path / "train.pqt"
+    test_pqt = task_path / "test.pqt"
+    train_npz = task_path / "train.npz"
+    test_npz = task_path / "test.npz"
+
+    if train_pqt.exists() and test_pqt.exists():
+        train_df = pd.read_parquet(train_pqt)
+        test_df = pd.read_parquet(test_pqt)
+    elif train_npz.exists() and test_npz.exists():
+        train_df = _read_npz_df(train_npz)
+        test_df = _read_npz_df(test_npz)
+    else:
+        raise FileNotFoundError(
+            f"Could not find train/test as .pqt or .npz in {task_path}. "
+            "Expected 'train.pqt' & 'test.pqt' or 'train.npz' & 'test.npz'."
+        )
     
     # Load metadata
     with open(task_path / "metadata.yaml", "r") as f:
