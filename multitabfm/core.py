@@ -15,9 +15,9 @@ class MultiTabFM:
         self.dfs_config = dfs_config or {}
         self.model_adapter = AGAdapter(model_config)
 
-    def fit(self, train_features: pd.DataFrame, label_column: str, task_type: str) -> None:
+    def fit(self, train_features: pd.DataFrame, label_column: str, task_type:Optional[str]=None, eval_metric:Optional[str] = None) -> None:
         """Fit the model on feature-augmented training data."""
-        return self.model_adapter.fit(train_features, label_column, task_type)
+        return self.model_adapter.fit(train_features, label_column, task_type, eval_metric)
 
     def predict_proba(self, test_features: pd.DataFrame) -> pd.DataFrame:
         proba = self.model_adapter.predict_proba(test_features)
@@ -71,7 +71,7 @@ class MultiTabFM:
         train_data = pd.concat([train_features, Y_train], axis=1)
 
         # 2. Train model
-        self.fit(train_data, label_column=target_column, task_type=task_type)
+        self.fit(train_data, label_column=target_column, task_type=task_type, eval_metric=eval_metrics[0] if eval_metrics else None)
 
         # 3. Predict
         if task_type == "regression":

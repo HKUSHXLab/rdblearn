@@ -83,7 +83,7 @@ class AGAdapter(ModelPredictor):
                 return d1
             deep_merge(self.model_config, model_config)
 
-    def fit(self, X: pd.DataFrame, label_column: str, task_type):
+    def fit(self, X: pd.DataFrame, label_column: str, task_type: Optional[str] = None,eval_metric: Optional[str] = None) -> None:
         # Setup feature generator
         feature_generator = AutoMLPipelineFeatureGenerator(
             enable_datetime_features=True,
@@ -93,7 +93,7 @@ class AGAdapter(ModelPredictor):
         )
 
         # Create and train predictor
-        self.predictor = TabularPredictor(label=label_column, problem_type=task_type).fit(
+        self.predictor = TabularPredictor(label=label_column, problem_type=task_type, eval_metric=eval_metric).fit(
             train_data=X,
             feature_generator=feature_generator,
             **self.model_config,

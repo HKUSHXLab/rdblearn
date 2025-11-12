@@ -14,17 +14,17 @@ def main():
     model_config = {
             "hyperparameters": {
                 "TABPFNV2": {
-                    "n_estimators": 2,
+                    "n_estimators": 8,
                 }
             },
         }
     preds, metrics = train_and_predict(
-        rdb_data_path="/root/yanlin/tabular-chat-predictor/data/rel-amazon",
-        task_data_path="/root/yanlin/tabular-chat-predictor/data/rel-amazon/user-churn",
-        enable_dfs=True,
+        rdb_data_path="/root/yanlin/tabular-chat-predictor/data/rel-f1-post-dfs-3",
+        task_data_path="/root/yanlin/tabular-chat-predictor/data/rel-f1-post-dfs-3/driver-position",
+        enable_dfs=False,
         dfs_config=dfs_config,
         model_config=model_config,
-        eval_metrics=["auroc"]
+        eval_metrics=["mae"]
     )
     
     print(f"Results: {metrics}")
