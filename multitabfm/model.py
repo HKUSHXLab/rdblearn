@@ -1,4 +1,5 @@
 from typing import Optional
+from pathlib import Path
 import pandas as pd
 import numpy as np
 from autogluon.tabular import TabularPredictor
@@ -59,7 +60,7 @@ class AGAdapter(ModelPredictor):
                     "n_jobs": -1,
                     "n_estimators": 8,
                     "inference_config": {
-                        "SUBSAMPLE_SAMPLES": 10000,
+                        "SUBSAMPLE_SAMPLES": 2048,
                     },
                     "ignore_pretraining_limits": True,
                     # Align with test_autogluon to avoid unexpected safety cutoffs
@@ -72,6 +73,7 @@ class AGAdapter(ModelPredictor):
             "num_bag_sets": None,
             "num_stack_levels": 0,
         }
+        self.predictor_kwargs: dict = {}
         if model_config:
             # Deep merge dictionaries
             def deep_merge(d1, d2):
@@ -81,9 +83,21 @@ class AGAdapter(ModelPredictor):
                     else:
                         d1[k] = v
                 return d1
-            deep_merge(self.model_config, model_config)
+            predictor_kwargs = model_config.get("predictor_kwargs", {}) or {}
+            self.predictor_kwargs.update(predictor_kwargs)
 
-    def fit(self, X: pd.DataFrame, label_column: str, task_type: Optional[str] = None,eval_metric: Optional[str] = None) -> None:
+            # Allow simple aliases for convenience
+            for key in ("path", "predictor_path", "model_output_path", "output_path"):
+                if key in model_config and model_config[key]:
+                    self.predictor_kwargs.setdefault("path", model_config[key])
+
+            filtered_config = {
+                k: v for k, v in model_config.items()
+                if k not in {"predictor_kwargs", "path", "predictor_path", "model_output_path", "output_path"}
+            }
+            deep_merge(self.model_config, filtered_config)
+
+    def fit(self, X: pd.DataFrame, label_column: str, task_type: Optional[str] = None, eval_metric: Optional[str] = None) -> None:
         # Setup feature generator
         feature_generator = AutoMLPipelineFeatureGenerator(
             enable_datetime_features=True,
@@ -93,14 +107,42 @@ class AGAdapter(ModelPredictor):
         )
 
         # Create and train predictor
-        self.predictor = TabularPredictor(label=label_column, problem_type=task_type, eval_metric=eval_metric).fit(
+        predictor_init_kwargs = {
+            "label": label_column,
+            "problem_type": task_type,
+            "eval_metric": eval_metric,
+        }
+        predictor_init_kwargs.update(self.predictor_kwargs)
+
+        model_path = predictor_init_kwargs.get("path")
+        if model_path:
+            Path(model_path).mkdir(parents=True, exist_ok=True)  # Ensure AutoGluon can write here
+
+        self.predictor = TabularPredictor(**predictor_init_kwargs).fit(
             train_data=X,
             feature_generator=feature_generator,
             **self.model_config,
         )
     
-    def predict_proba(self, X: pd.DataFrame) -> pd.DataFrame:
-        proba = self.predictor.predict_proba(X)
+    def predict_proba(self, X: pd.DataFrame, batch_size: int = 5000) -> pd.DataFrame:
+        if self.predictor is None:
+            raise RuntimeError("Model not trained. Call fit() first.")
+        
+        # Process in batches to avoid CUDA memory issues
+        proba_batches = []
+        num_rows = len(X)
+        
+        for start in range(0, num_rows, batch_size):
+            end = min(start + batch_size, num_rows)
+            batch = X.iloc[start:end]
+            proba_batch = self.predictor.predict_proba(batch)
+            proba_batches.append(proba_batch)
+        
+        # Concatenate all batches
+        if len(proba_batches) == 1:
+            proba = proba_batches[0]
+        else:
+            proba = pd.concat(proba_batches, axis=0).reset_index(drop=True)
 
         # Normalize to DataFrame output with class labels as columns
         if isinstance(proba, pd.Series):
@@ -126,11 +168,26 @@ class AGAdapter(ModelPredictor):
             class_labels = list(range(n_classes))
         return pd.DataFrame(arr, columns=class_labels)
 
-    def predict(self, X: pd.DataFrame) -> pd.Series:
+    def predict(self, X: pd.DataFrame, batch_size: int = 5000) -> pd.Series:
         if self.predictor is None:
             raise RuntimeError("Model not trained. Call fit() first.")
-        # For regression, return numeric predictions; for classification, return class labels
-        preds = self.predictor.predict(X)
+        
+        # Process in batches to avoid CUDA memory issues
+        pred_batches = []
+        num_rows = len(X)
+        
+        for start in range(0, num_rows, batch_size):
+            end = min(start + batch_size, num_rows)
+            batch = X.iloc[start:end]
+            pred_batch = self.predictor.predict(batch)
+            pred_batches.append(pred_batch)
+        
+        # Concatenate all batches
+        if len(pred_batches) == 1:
+            preds = pred_batches[0]
+        else:
+            preds = pd.concat(pred_batches, axis=0).reset_index(drop=True)
+        
         # Ensure pandas Series output
         if isinstance(preds, pd.Series):
             return preds

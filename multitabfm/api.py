@@ -22,6 +22,7 @@ def train_and_predict(
     dfs_config: Optional[dict] = None,
     model_config: Optional[dict] = None,
     eval_metrics: Optional[List[str]] = None,
+    batch_size: int = 5000,
 ) -> Tuple[Union[pd.DataFrame, np.ndarray], Optional[dict]]:
     """End-to-end convenience function to train and predict.
 
@@ -32,12 +33,13 @@ def train_and_predict(
         dfs_config: Optional DFS configuration dict
         model_config: Optional model configuration dict
         eval_metrics: Optional list of metric names to compute on predictions
+        batch_size: Batch size for prediction to avoid CUDA memory issues (default: 5000)
 
     Returns:
         Tuple of (predictions, metrics). If eval_metrics is provided and labels are
         available in the test set, metrics will be a dict; otherwise None.
     """
-    engine = MultiTabFM(dfs_config=dfs_config, model_config=model_config)
+    engine = MultiTabFM(dfs_config=dfs_config, model_config=model_config, batch_size=batch_size)
     preds, metrics = engine.train_and_predict(
         rdb_data_path=rdb_data_path,
         task_data_path=task_data_path,
