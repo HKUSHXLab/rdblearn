@@ -4,7 +4,7 @@ import numpy as np
 import warnings
 
 from .feature_engineer import generate_features
-from .model import AGAdapter
+from .model import AGAdapter, CustomModelAdapter, CustomTabPFN
 from .evaluation import compute_metrics
 from .utils import load_dataset
 
@@ -78,11 +78,17 @@ def _merge_original_and_dfs(
 class MultiTabFM:
     """Simplified multi-table feature modeling framework."""
     
-    def __init__(self, dfs_config: Optional[dict] = None, model_config: Optional[dict] = None, batch_size: int = 5000):
+    def __init__(self, dfs_config: Optional[dict] = None, model_config: Optional[dict] = None, batch_size: int = 5000, custom_model_class: Optional[type] = None):
         self.model_config = model_config or {}
         self.dfs_config = dfs_config or {}
         self.batch_size = batch_size
-        self.model_adapter = AGAdapter(model_config)
+        self.custom_model_class = custom_model_class
+        
+        # Choose adapter based on whether custom model is provided
+        if custom_model_class is not None:
+            self.model_adapter = CustomModelAdapter(model_config, custom_model_class)
+        else:
+            self.model_adapter = AGAdapter(model_config)
 
     def fit(self, train_features: pd.DataFrame, label_column: str, task_type:Optional[str]=None, eval_metric:Optional[str] = None) -> None:
         """Fit the model on feature-augmented training data."""

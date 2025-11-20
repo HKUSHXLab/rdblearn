@@ -3,7 +3,11 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 from autogluon.tabular import TabularPredictor
-from autogluon.features.generators import AutoMLPipelineFeatureGenerator
+from autogluon.features.generators import AutoMLPipelineFeatureGenerator, LabelEncoderFeatureGenerator
+from autogluon.core.data import LabelCleaner
+from autogluon.core.utils import infer_problem_type
+from autogluon.core.models import AbstractModel
+from tabpfn import TabPFNClassifier, TabPFNRegressor
 
 class ModelPredictor:
     """Base class for model training and prediction."""
@@ -187,6 +191,174 @@ class AGAdapter(ModelPredictor):
             preds = pred_batches[0]
         else:
             preds = pd.concat(pred_batches, axis=0).reset_index(drop=True)
+        
+        # Ensure pandas Series output
+        if isinstance(preds, pd.Series):
+            return preds
+        return pd.Series(np.asarray(preds))
+    
+class CustomTabPFN():
+    def __init__(self, model_path: str = None, task_type: str = "regression", **kwargs):
+        super().__init__(**kwargs)
+        self._feature_generator = None
+        self.model_path = model_path or "/root/autodl-tmp/tabpfn_2_5"
+        self.task_type = task_type
+
+    def _fit(self, X: pd.DataFrame, y: pd.Series, **kwargs):
+
+        # Choose the appropriate TabPFN model based on task type
+        if self.task_type == "regression":
+            regressor_model_path = self.model_path + "/tabpfn-v2.5-regressor-v2.5_default.ckpt"
+            self.model = TabPFNRegressor(model_path=regressor_model_path)
+        else:
+            classifier_model_path = self.model_path + "/tabpfn-v2.5-classifier-v2.5_default.ckpt"
+            self.model = TabPFNClassifier(model_path=classifier_model_path)
+        
+        self.model.fit(X, y)
+
+
+    def _predict_proba(self, X: pd.DataFrame, **kwargs):
+        """Predict class probabilities."""
+        if hasattr(self.model, 'predict_proba'):
+            return self.model.predict_proba(X)
+        else:
+            # For regression, return predictions as probabilities
+            preds = self.model.predict(X)
+            return np.column_stack([1 - preds, preds])  # Dummy probabilities
+
+    def _predict(self, X: pd.DataFrame, **kwargs):
+        """Predict target values."""
+        return self.model.predict(X, output_type="mean" if self.task_type == "regression" else None)
+
+
+class CustomModelAdapter(ModelPredictor):
+    """Adapter for custom models with automatic feature transformation."""
+
+    def __init__(self, model_config: Optional[dict] = None, custom_model_class: Optional[type] = None):
+        self.model = None
+        self.custom_model_class = custom_model_class or CustomTabPFN
+        self.model_config = model_config or {}
+        self.feature_generator = None
+        self.label_cleaner = None
+        self.problem_type = None
+
+    def fit(self, X: pd.DataFrame, label_column: str, task_type: Optional[str] = None, eval_metric: Optional[str] = None) -> None:
+        """Fit the custom model with automatic feature transformation."""
+        # Separate features and labels
+        features = X.drop(columns=[label_column])
+        labels = X[label_column]
+
+        # Infer problem type if not provided
+        self.problem_type = task_type or infer_problem_type(y=labels)
+        
+        # Setup label cleaner
+        self.label_cleaner = LabelCleaner.construct(problem_type=self.problem_type, y=labels)
+        y_clean = self.label_cleaner.transform(labels)
+
+        # Setup feature generator for automatic feature transformation
+        self.feature_generator = AutoMLPipelineFeatureGenerator(
+            enable_datetime_features=True,
+            enable_raw_text_features=False,
+            enable_text_special_features=False,
+            enable_text_ngram_features=False,
+        )
+        
+        # Transform features
+        X_clean = self.feature_generator.fit_transform(features)
+
+        # Add task_type to model config if using CustomTabPFN
+        if self.custom_model_class == CustomTabPFN:
+            self.model_config['task_type'] = self.problem_type
+
+        # Initialize and fit the custom model
+        self.model = self.custom_model_class(**self.model_config)
+        
+        # Fit the model
+        self.model._fit(X=X_clean, y=y_clean)
+
+    def predict_proba(self, X: pd.DataFrame, batch_size: int = 5000) -> pd.DataFrame:
+        """Predict class probabilities with automatic feature transformation."""
+        if self.model is None:
+            raise RuntimeError("Model not trained. Call fit() first.")
+        
+        if self.feature_generator is None:
+            raise RuntimeError("Feature generator not initialized. Call fit() first.")
+
+        # Transform features using the fitted feature generator
+        X_transformed = self.feature_generator.transform(X)
+        
+        # Process in batches to avoid memory issues
+        proba_batches = []
+        num_rows = len(X_transformed)
+        
+        for start in range(0, num_rows, batch_size):
+            end = min(start + batch_size, num_rows)
+            batch = X_transformed.iloc[start:end]
+            
+            # Check if model has predict_proba method
+            if hasattr(self.model, 'predict_proba'):
+                proba_batch = self.model.predict_proba(batch)
+            else:
+                raise AttributeError("Custom model must implement predict_proba method for classification tasks")
+            
+            proba_batches.append(proba_batch)
+        
+        # Concatenate all batches
+        if len(proba_batches) == 1:
+            proba = proba_batches[0]
+        else:
+            proba = pd.concat(proba_batches, axis=0).reset_index(drop=True)
+
+        # Normalize to DataFrame output with class labels as columns
+        if isinstance(proba, pd.Series):
+            # Assume binary positive-class probabilities; expand to two columns [0,1]
+            p1 = proba.to_numpy()
+            p0 = 1 - p1
+            return pd.DataFrame({0: p0, 1: p1})
+        if isinstance(proba, pd.DataFrame):
+            return proba
+
+        # Fallback: construct DataFrame from ndarray
+        arr = np.asarray(proba)
+        if arr.ndim == 1:
+            # Assume binary probabilities of positive class; create [0,1]
+            p1 = arr
+            p0 = 1 - p1
+            return pd.DataFrame({0: p0, 1: p1})
+        n_classes = arr.shape[1]
+        class_labels = list(range(n_classes))
+        return pd.DataFrame(arr, columns=class_labels)
+
+    def predict(self, X: pd.DataFrame, batch_size: int = 5000) -> pd.Series:
+        """Predict target values with automatic feature transformation."""
+        if self.model is None:
+            raise RuntimeError("Model not trained. Call fit() first.")
+        
+        if self.feature_generator is None:
+            raise RuntimeError("Feature generator not initialized. Call fit() first.")
+
+        # Transform features using the fitted feature generator
+        X_transformed = self.feature_generator.transform(X)
+        
+        # Process in batches to avoid memory issues
+        pred_batches = []
+        num_rows = len(X_transformed)
+        
+        for start in range(0, num_rows, batch_size):
+            end = min(start + batch_size, num_rows)
+            batch = X_transformed.iloc[start:end]
+            pred_batch = self.model._predict(batch)
+            pred_batches.append(pred_batch)
+        
+        # Concatenate all batches
+        if len(pred_batches) == 1:
+            preds = pred_batches[0]
+        else:
+            preds = pd.concat(pred_batches, axis=0).reset_index(drop=True)
+        
+        # Transform predictions back to original label space if needed
+        if self.label_cleaner is not None:
+            preds = self.label_cleaner.inverse_transform(preds)
         
         # Ensure pandas Series output
         if isinstance(preds, pd.Series):
