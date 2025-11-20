@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import warnings
 
-from .feature_engineer import generate_features,prepare_feature_inputs,merge_original_and_dfs
+from .feature_engineer import generate_features,prepare_feature_inputs,merge_original_and_dfs,ag_transform
 from .model import AGAdapter, CustomModelAdapter, CustomTabPFN
 from .evaluation import compute_metrics
 from .utils import load_dataset
@@ -99,17 +99,20 @@ class MultiTabFM:
         else:
             train_features = base_train
             test_features = base_test
-        train_data = pd.concat([train_features, Y_train], axis=1)
         
+        X_train_transformed, y_train_transformed, X_test_transformed = ag_transform(
+            train_features, Y_train, test_features, task_type=task_type
+        )
         
+        train_data = pd.concat([X_train_transformed, y_train_transformed], axis=1)
         # 2. Train model
         self.fit(train_data, label_column=target_column, task_type=task_type, eval_metric=eval_metrics[0] if eval_metrics else None)
 
         # 3. Predict
         if task_type == "regression":
-            preds_or_proba = self.predict(test_features)
+            preds_or_proba = self.predict(X_test_transformed)
         else:
-            preds_or_proba = self.predict_proba(test_features)
+            preds_or_proba = self.predict_proba(X_test_transformed)
 
         # 4. Evaluate if possible
         metrics = None

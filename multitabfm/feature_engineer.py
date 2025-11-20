@@ -6,6 +6,9 @@ from typing import Optional, List, Tuple, Union, Set
 import pandas as pd
 import numpy as np
 import warnings
+from autogluon.features.generators import AutoMLPipelineFeatureGenerator
+from autogluon.core.data import LabelCleaner
+from autogluon.core.utils import infer_problem_type
 
     
 def generate_features(
@@ -132,7 +135,7 @@ def prepare_feature_inputs(
     return coerced_train, coerced_test, sanitized_train, sanitized_test, dfs_input_cols
 
 
-def _merge_original_and_dfs(
+def merge_original_and_dfs(
     original: pd.DataFrame,
     dfs_features: pd.DataFrame,
     dfs_input_cols: List[str]
@@ -145,3 +148,53 @@ def _merge_original_and_dfs(
     ], axis=1)
     return combined
 
+
+def ag_transform(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_test: Optional[pd.DataFrame] = None,
+    task_type: Optional[str] = None,
+    feature_generator_config: Optional[dict] = None
+) -> Tuple[pd.DataFrame, pd.Series, Optional[pd.DataFrame], AutoMLPipelineFeatureGenerator, LabelCleaner, str]:
+    """
+    Transform features and labels using AutoGluon's feature generator and label cleaner.
+    
+    Args:
+        X_train: Training features dataframe
+        y_train: Training labels series
+        X_test: Optional test features dataframe
+        task_type: Optional task type ('binary', 'multiclass', 'regression')
+        feature_generator_config: Optional config for AutoMLPipelineFeatureGenerator
+        
+    Returns:
+        Tuple of (X_train_transformed, y_train_transformed, X_test_transformed, 
+                 feature_generator, label_cleaner, problem_type)
+    """
+    # Infer problem type if not provided
+    problem_type = task_type
+    
+    # Setup label cleaner
+    label_cleaner = LabelCleaner.construct(problem_type=problem_type, y=y_train)
+    y_train_transformed = label_cleaner.transform(y_train)
+    
+    # Setup feature generator with default config
+    default_config = {
+        "enable_datetime_features": True,
+        "enable_raw_text_features": False,
+        "enable_text_special_features": False,
+        "enable_text_ngram_features": False,
+    }
+    if feature_generator_config:
+        default_config.update(feature_generator_config)
+    
+    feature_generator = AutoMLPipelineFeatureGenerator(**default_config)
+    
+    # Transform training features
+    X_train_transformed = feature_generator.fit_transform(X_train)
+    
+    # Transform test features if provided
+    X_test_transformed = None
+    if X_test is not None:
+        X_test_transformed = feature_generator.transform(X_test)
+    
+    return X_train_transformed, y_train_transformed, X_test_transformed

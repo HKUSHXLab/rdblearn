@@ -3,9 +3,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 from autogluon.tabular import TabularPredictor
-from autogluon.features.generators import AutoMLPipelineFeatureGenerator, LabelEncoderFeatureGenerator
-from autogluon.core.data import LabelCleaner
-from autogluon.core.utils import infer_problem_type
+from autogluon.features.generators import AutoMLPipelineFeatureGenerator
 from autogluon.core.models import AbstractModel
 from tabpfn import TabPFNClassifier, TabPFNRegressor
 
@@ -205,7 +203,6 @@ class CustomTabPFN():
         self.task_type = task_type
 
     def _fit(self, X: pd.DataFrame, y: pd.Series, **kwargs):
-
         # Choose the appropriate TabPFN model based on task type
         if self.task_type == "regression":
             regressor_model_path = self.model_path + "/tabpfn-v2.5-regressor-v2.5_default.ckpt"
@@ -238,9 +235,6 @@ class CustomModelAdapter(ModelPredictor):
         self.model = None
         self.custom_model_class = custom_model_class or CustomTabPFN
         self.model_config = model_config or {}
-        self.feature_generator = None
-        self.label_cleaner = None
-        self.problem_type = None
 
     def fit(self, X: pd.DataFrame, label_column: str, task_type: Optional[str] = None, eval_metric: Optional[str] = None) -> None:
         """Fit the custom model with automatic feature transformation."""
@@ -248,52 +242,28 @@ class CustomModelAdapter(ModelPredictor):
         features = X.drop(columns=[label_column])
         labels = X[label_column]
 
-        # Infer problem type if not provided
-        self.problem_type = task_type or infer_problem_type(y=labels)
-        
-        # Setup label cleaner
-        self.label_cleaner = LabelCleaner.construct(problem_type=self.problem_type, y=labels)
-        y_clean = self.label_cleaner.transform(labels)
-
-        # Setup feature generator for automatic feature transformation
-        self.feature_generator = AutoMLPipelineFeatureGenerator(
-            enable_datetime_features=True,
-            enable_raw_text_features=False,
-            enable_text_special_features=False,
-            enable_text_ngram_features=False,
-        )
-        
-        # Transform features
-        X_clean = self.feature_generator.fit_transform(features)
-
         # Add task_type to model config if using CustomTabPFN
         if self.custom_model_class == CustomTabPFN:
-            self.model_config['task_type'] = self.problem_type
+            self.model_config['task_type'] = task_type
 
         # Initialize and fit the custom model
         self.model = self.custom_model_class(**self.model_config)
         
         # Fit the model
-        self.model._fit(X=X_clean, y=y_clean)
+        self.model._fit(X=features, y=labels)
 
     def predict_proba(self, X: pd.DataFrame, batch_size: int = 5000) -> pd.DataFrame:
         """Predict class probabilities with automatic feature transformation."""
         if self.model is None:
             raise RuntimeError("Model not trained. Call fit() first.")
         
-        if self.feature_generator is None:
-            raise RuntimeError("Feature generator not initialized. Call fit() first.")
-
-        # Transform features using the fitted feature generator
-        X_transformed = self.feature_generator.transform(X)
-        
         # Process in batches to avoid memory issues
         proba_batches = []
-        num_rows = len(X_transformed)
+        num_rows = len(X)
         
         for start in range(0, num_rows, batch_size):
             end = min(start + batch_size, num_rows)
-            batch = X_transformed.iloc[start:end]
+            batch = X.iloc[start:end]
             
             # Check if model has predict_proba method
             if hasattr(self.model, 'predict_proba'):
@@ -333,12 +303,9 @@ class CustomModelAdapter(ModelPredictor):
         """Predict target values with automatic feature transformation."""
         if self.model is None:
             raise RuntimeError("Model not trained. Call fit() first.")
-        
-        if self.feature_generator is None:
-            raise RuntimeError("Feature generator not initialized. Call fit() first.")
 
         # Transform features using the fitted feature generator
-        X_transformed = self.feature_generator.transform(X)
+        X_transformed = X
         
         # Process in batches to avoid memory issues
         pred_batches = []
@@ -355,10 +322,6 @@ class CustomModelAdapter(ModelPredictor):
             preds = pred_batches[0]
         else:
             preds = pd.concat(pred_batches, axis=0).reset_index(drop=True)
-        
-        # Transform predictions back to original label space if needed
-        if self.label_cleaner is not None:
-            preds = self.label_cleaner.inverse_transform(preds)
         
         # Ensure pandas Series output
         if isinstance(preds, pd.Series):
