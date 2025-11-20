@@ -1,10 +1,9 @@
-from typing import Optional, List, Tuple, Union, Set
+from typing import Optional, List, Tuple, Union
 import pandas as pd
 import numpy as np
-import warnings
 
-from .feature_engineer import generate_features,prepare_feature_inputs,merge_original_and_dfs,ag_transform
-from .model import AGAdapter, CustomModelAdapter, CustomTabPFN
+from .feature_engineer import generate_features, prepare_feature_inputs, merge_original_and_dfs, ag_transform
+from .model import CustomTabPFN
 from .evaluation import compute_metrics
 from .utils import load_dataset
 
@@ -17,23 +16,70 @@ class MultiTabFM:
         self.dfs_config = dfs_config or {}
         self.batch_size = batch_size
         self.custom_model_class = custom_model_class
-        
-        # Choose adapter based on whether custom model is provided
-        if custom_model_class is not None:
-            self.model_adapter = CustomModelAdapter(model_config, custom_model_class)
-        else:
-            self.model_adapter = AGAdapter(model_config)
+        self.model = None
 
-    def fit(self, train_features: pd.DataFrame, label_column: str, task_type:Optional[str]=None, eval_metric:Optional[str] = None) -> None:
+    def _batch_predict_proba(self, X: pd.DataFrame, batch_size: int) -> pd.DataFrame:
+        """Batch-wise probability prediction. Returns DataFrame."""
+        proba_batches = []
+        num_rows = len(X)
+        
+        for start in range(0, num_rows, batch_size):
+            end = min(start + batch_size, num_rows)
+            batch = X.iloc[start:end]
+            proba_batch = self.model.predict_proba(batch)
+            proba_batches.append(proba_batch)
+        
+        # Concatenate all batches
+        if len(proba_batches) == 1:
+            return proba_batches[0]
+        else:
+            return pd.concat(proba_batches, axis=0).reset_index(drop=True)
+
+    def _batch_predict(self, X: pd.DataFrame, batch_size: int) -> pd.Series:
+        """Batch-wise value prediction. Returns Series."""
+        pred_batches = []
+        num_rows = len(X)
+        
+        for start in range(0, num_rows, batch_size):
+            end = min(start + batch_size, num_rows)
+            batch = X.iloc[start:end]
+            pred_batch = self.model.predict(batch)
+            pred_batches.append(pred_batch)
+        
+        # Concatenate all batches
+        if len(pred_batches) == 1:
+            return pred_batches[0]
+        else:
+            return pd.concat(pred_batches, axis=0).reset_index(drop=True)
+
+    def fit(self, train_features: pd.DataFrame, label_column: str, task_type: Optional[str] = None, eval_metric: Optional[str] = None) -> None:
         """Fit the model on feature-augmented training data."""
-        return self.model_adapter.fit(train_features, label_column, task_type, eval_metric)
+        # Separate features and labels
+        features = train_features.drop(columns=[label_column])
+        labels = train_features[label_column]
+        
+        # Add task_type to model config
+        model_config = self.model_config.copy()
+        model_config['task_type'] = task_type
+        
+        # Use custom model class if provided, otherwise default to CustomTabPFN
+        model_class = self.custom_model_class or CustomTabPFN
+        
+        # Initialize and fit the model
+        self.model = model_class(**model_config)
+        self.model.fit(X=features, y=labels)
 
     def predict_proba(self, test_features: pd.DataFrame) -> pd.DataFrame:
-        proba = self.model_adapter.predict_proba(test_features, batch_size=self.batch_size)
-        return proba
+        """Predict class probabilities using batch processing."""
+        if self.model is None:
+            raise RuntimeError("Model not trained. Call fit() first.")
+        return self._batch_predict_proba(test_features, self.batch_size)
 
     def predict(self, test_features: pd.DataFrame) -> pd.Series:
-        return self.model_adapter.predict(test_features, batch_size=self.batch_size)
+        """Predict target values using batch processing."""
+        if self.model is None:
+            raise RuntimeError("Model not trained. Call fit() first.")
+        return self._batch_predict(test_features, self.batch_size)
 
     def evaluate(self, labels: pd.Series, preds_or_proba: Union[pd.DataFrame, np.ndarray, pd.Series], metrics: Optional[List[str]] = None) -> dict:
         """Evaluate predictions against true labels for classification or regression."""
