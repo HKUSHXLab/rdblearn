@@ -1,5 +1,7 @@
 from typing import Optional, Union
 import pandas as pd
+import fastdfs
+from fastdfs.transform import RDBTransformWrapper, RDBTransformPipeline, HandleDummyTable, FeaturizeDatetime
 from fastdfs.api import compute_dfs_features
 from fastdfs.dfs import DFSConfig
 from typing import Optional, List, Tuple, Union, Set
@@ -32,14 +34,31 @@ def generate_features(
     """
     if rdb is None:
         raise ValueError("rdb must be provided")
+
+    effective_config = DFSConfig()
+    if dfs_config:
+        for key, value in dfs_config.items():
+            if hasattr(effective_config, key):
+                setattr(effective_config, key, value)
+
+    pipeline = fastdfs.DFSPipeline(
+                # transform_pipeline=None,  # No transforms for this test
+                transform_pipeline=RDBTransformPipeline([
+                    HandleDummyTable(),
+                    RDBTransformWrapper(FeaturizeDatetime(features=["year", "month", "day", "hour", "dayofweek"])), #, cyclic=cyclic)),
+                ]),
+                dfs_config=effective_config
+            )
     
-    return compute_dfs_features(
+    features = pipeline.compute_features(
         rdb=rdb,
         target_dataframe=target_df,
         key_mappings=key_mappings,
-        cutoff_time_column=time_column,
-        config_overrides=dfs_config or {}
+        cutoff_time_column=time_column
     )
+    features.loc[:, ~features.columns.duplicated()]
+    features = features.replace({pd.NA: None})
+    return features
 
 
 def _is_array_like(value: object) -> bool:
@@ -153,7 +172,6 @@ def ag_transform(
     X_train: pd.DataFrame,
     y_train: pd.Series,
     X_test: Optional[pd.DataFrame] = None,
-    task_type: Optional[str] = None,
     feature_generator_config: Optional[dict] = None
 ) -> Tuple[pd.DataFrame, pd.Series, Optional[pd.DataFrame], AutoMLPipelineFeatureGenerator, LabelCleaner, str]:
     """
@@ -163,7 +181,6 @@ def ag_transform(
         X_train: Training features dataframe
         y_train: Training labels series
         X_test: Optional test features dataframe
-        task_type: Optional task type ('binary', 'multiclass', 'regression')
         feature_generator_config: Optional config for AutoMLPipelineFeatureGenerator
         
     Returns:
@@ -171,7 +188,7 @@ def ag_transform(
                  feature_generator, label_cleaner, problem_type)
     """
     # Infer problem type if not provided
-    problem_type = task_type
+    problem_type = infer_problem_type(y_train)
     
     # Setup label cleaner
     label_cleaner = LabelCleaner.construct(problem_type=problem_type, y=y_train)

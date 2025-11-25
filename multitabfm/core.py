@@ -9,7 +9,6 @@ from .utils import load_dataset
 
 
 class MultiTabFM:
-    """Simplified multi-table feature modeling framework."""
     
     def __init__(self, dfs_config: Optional[dict] = None, model_config: Optional[dict] = None, batch_size: int = 5000, custom_model_class: Optional[type] = None):
         self.model_config = model_config or {}
@@ -110,7 +109,10 @@ class MultiTabFM:
         time_column = metadata['time_column']
         target_column = metadata['target_column']
         # if metadata has task_type, use it; else task_type is None
-        task_type = metadata.get('task_type', None)
+        if self.model_config and 'task_type' in self.model_config:
+            task_type = self.model_config['task_type']
+        else:
+            task_type = metadata.get('task_type', None)
 
         # Prepare target dataframes
         X_train, Y_train = train_data.drop(columns=[target_column]), train_data[target_column]
@@ -147,9 +149,8 @@ class MultiTabFM:
             test_features = base_test
         
         X_train_transformed, y_train_transformed, X_test_transformed = ag_transform(
-            train_features, Y_train, test_features, task_type=task_type
+            train_features, Y_train, test_features
         )
-        
         train_data = pd.concat([X_train_transformed, y_train_transformed], axis=1)
         # 2. Train model
         self.fit(train_data, label_column=target_column, task_type=task_type, eval_metric=eval_metrics[0] if eval_metrics else None)

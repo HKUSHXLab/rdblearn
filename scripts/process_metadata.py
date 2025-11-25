@@ -26,7 +26,7 @@ The transform logic per user requirements:
 The generated per-task metadata file is intentionally minimal and can be
 extended later if needed.
 
-python old_scripts/process_metadata.py --dataset_name rel-amazon
+python scripts/process_metadata.py --dataset_name rel-amazon
 """
 
 from __future__ import annotations
