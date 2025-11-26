@@ -18,34 +18,24 @@ __all__ = [
 def train_and_predict(
     rdb_data_path: str,
     task_data_path: str,
-    enable_dfs: Optional[bool] = True,
     dfs_config: Optional[dict] = None,
     model_config: Optional[dict] = None,
-    eval_metrics: Optional[List[str]] = None,
-    batch_size: int = 5000,
-    custom_model_class: Optional[type] = None,
 ) -> Tuple[Union[pd.DataFrame, np.ndarray], Optional[dict]]:
     """End-to-end convenience function to train and predict.
 
     Args:
         rdb_data_path: Path to the RDB data directory (e.g., "data/rel-event")
         task_data_path: Path to the task data directory (e.g., "data/rel-event/user-ignore")
-        enable_dfs: Whether to enable deep feature synthesis to augment features
-        dfs_config: Optional DFS configuration dict
+        dfs_config: Optional DFS configuration dict. If provided, DFS is enabled.
         model_config: Optional model configuration dict
-        eval_metrics: Optional list of metric names to compute on predictions
-        batch_size: Batch size for prediction to avoid CUDA memory issues (default: 5000)
-        custom_model_class: Optional custom model class to use instead of AutoGluon
 
     Returns:
         Tuple of (predictions, metrics). If eval_metrics is provided and labels are
         available in the test set, metrics will be a dict; otherwise None.
     """
-    engine = MultiTabFM(dfs_config=dfs_config, model_config=model_config, batch_size=batch_size, custom_model_class=custom_model_class)
+    engine = MultiTabFM(dfs_config=dfs_config, model_config=model_config)
     preds, metrics = engine.train_and_predict(
         rdb_data_path=rdb_data_path,
         task_data_path=task_data_path,
-        enable_dfs=enable_dfs,
-        eval_metrics=eval_metrics,
     )
     return preds, metrics

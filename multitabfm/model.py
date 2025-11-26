@@ -8,9 +8,6 @@ from tabpfn import TabPFNClassifier, TabPFNRegressor
 
 
 LIMIX_ROOT = Path("/root/yl_project/LimiX")
-DEFAULT_TABPFN_ROOT = Path("/root/autodl-tmp/tabpfn_2_5")
-DEFAULT_REGRESSOR_CHECKPOINT = "tabpfn-v2.5-regressor-v2.5_default.ckpt"
-DEFAULT_CLASSIFIER_CHECKPOINT = "tabpfn-v2.5-classifier-v2.5_default.ckpt"
 
 if LIMIX_ROOT.exists() and str(LIMIX_ROOT) not in sys.path:
     sys.path.append(str(LIMIX_ROOT))
@@ -27,7 +24,9 @@ class CustomTabPFN:
     """Custom TabPFN model wrapper for classification and regression."""
     
     def __init__(self, model_path: str = None, task_type: str = "regression", max_samples: int = None):
-        self.model_path = model_path or "/root/autodl-tmp/tabpfn_2_5"
+        if model_path is None:
+             raise ValueError("CustomTabPFN requires a model_path pointing to the TabPFN directory.")
+        self.model_path = model_path
         self.task_type = task_type
         self.max_samples = max_samples  # Maximum samples to use for training
         self.model = None
@@ -102,6 +101,7 @@ class CustomLimiX:
         inference_config: Optional[Union[str, Path]] = None,
         normalize_target: bool = True,
         device: Optional[Union[str, torch.device]] = None,
+        max_samples: Optional[int] = None,
         **predictor_kwargs,
     ) -> None:
         task_type = task_type.lower()
@@ -125,6 +125,7 @@ class CustomLimiX:
         self.device = device
         self.limix_root = Path(limix_root)
         self.model_path = self._resolve_model_path(model_path)
+        self.max_samples = max_samples
 
         if inference_config is None:
             # config_name = "config/cls_default_16M_retrieval.json" if task_type == "classification" else "config/reg_default_16M_retrieval.json"
@@ -148,6 +149,21 @@ class CustomLimiX:
 
     def fit(self, X: Union[pd.DataFrame, np.ndarray], y: Union[pd.Series, np.ndarray], **_) -> None:
         """Store training data so LimiX can perform retrieval-based inference later."""
+        # Apply random sampling if dataset exceeds max_samples
+        if self.max_samples is not None and len(X) > self.max_samples:
+            print(f"Sampling {self.max_samples} from {len(X)} samples for LimiX training...")
+            if isinstance(X, pd.DataFrame):
+                indices = np.random.choice(len(X), size=self.max_samples, replace=False)
+                X = X.iloc[indices].reset_index(drop=True)
+                if isinstance(y, pd.Series):
+                    y = y.iloc[indices].reset_index(drop=True)
+                else:
+                    y = y[indices]
+            else:
+                indices = np.random.choice(len(X), size=self.max_samples, replace=False)
+                X = X[indices]
+                y = y[indices]
+
         X_arr, _ = self._prepare_features(X)
         y_arr = self._prepare_targets(y)
         if X_arr.shape[0] != y_arr.shape[0]:

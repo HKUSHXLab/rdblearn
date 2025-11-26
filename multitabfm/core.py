@@ -10,11 +10,17 @@ from .utils import load_dataset
 
 class MultiTabFM:
     
-    def __init__(self, dfs_config: Optional[dict] = None, model_config: Optional[dict] = None, batch_size: int = 5000, custom_model_class: Optional[type] = None):
-        self.model_config = model_config or {}
+    def __init__(self, dfs_config: Optional[dict] = None, model_config: Optional[dict] = None, batch_size: int = 5000):
+        self.model_config = (model_config or {}).copy()
         self.dfs_config = dfs_config or {}
-        self.batch_size = batch_size
-        self.custom_model_class = custom_model_class
+        
+        # Extract batch_size from model_config if present, otherwise use argument
+        if 'batch_size' in self.model_config:
+            self.batch_size = self.model_config.pop('batch_size')
+        else:
+            self.batch_size = batch_size
+            
+        self.custom_model_class = self.model_config.pop('custom_model_class', None)
         self.model = None
 
     def _batch_predict_proba(self, X: pd.DataFrame, batch_size: int) -> pd.DataFrame:
@@ -86,16 +92,12 @@ class MultiTabFM:
 
     def train_and_predict(self,
                          rdb_data_path: str,
-                         task_data_path: str,
-                         enable_dfs: bool = True,
-                         eval_metrics: Optional[List[str]] = None) -> Tuple[Union[pd.DataFrame, np.ndarray, pd.Series], Optional[dict]]:
+                         task_data_path: str) -> Tuple[Union[pd.DataFrame, np.ndarray, pd.Series], Optional[dict]]:
         """Main API: End-to-end training and prediction from data paths.
         
         Args:
             rdb_data_path: Path to RDB data directory (e.g., "data/rel-event")
             task_data_path: Path to task data directory (e.g., "data/rel-event/user-ignore")
-            enable_dfs: Whether to enable deep feature synthesis to augment features
-            eval_metrics: Optional evaluation metrics
             
         Returns:
             Tuple of (predictions, metrics)
@@ -108,11 +110,10 @@ class MultiTabFM:
         key_mappings = {k: v for d in metadata['key_mappings'] for k, v in d.items()}
         time_column = metadata['time_column']
         target_column = metadata['target_column']
-        # if metadata has task_type, use it; else task_type is None
-        if self.model_config and 'task_type' in self.model_config:
-            task_type = self.model_config['task_type']
-        else:
-            task_type = metadata.get('task_type', None)
+        # Prioritize task_type from metadata, fallback to model_config
+        task_type = metadata.get('task_type')
+        metric = metadata.get('evaluation_metric')
+        eval_metrics = [metric] if metric else None
 
         # Prepare target dataframes
         X_train, Y_train = train_data.drop(columns=[target_column]), train_data[target_column]
@@ -126,7 +127,7 @@ class MultiTabFM:
             dfs_input_cols,
         ) = prepare_feature_inputs(X_train, X_test, key_mappings, time_column)
 
-        if enable_dfs:
+        if self.dfs_config:
             train_dfs = generate_features(
                 sanitized_train,
                 rdb,
