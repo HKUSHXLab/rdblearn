@@ -150,7 +150,9 @@ class MultiTabFM:
             test_features = base_test
         
         X_train_transformed, y_train_transformed, X_test_transformed = ag_transform(
-            train_features, Y_train, test_features
+            train_features.reset_index(drop=True), 
+            Y_train.reset_index(drop=True), 
+            test_features.reset_index(drop=True)
         )
         train_data = pd.concat([X_train_transformed, y_train_transformed], axis=1)
         # 2. Train model

@@ -1,9 +1,12 @@
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 from pathlib import Path
 import sys
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import TensorDataset, DataLoader
 from tabpfn import TabPFNClassifier, TabPFNRegressor
 
 
@@ -21,32 +24,58 @@ except ModuleNotFoundError as exc:  # pragma: no cover - surface clear error for
 
 
 class CustomTabPFN:
-    """Custom TabPFN model wrapper for classification and regression."""
+    """Custom TabPFN model wrapper for classification and regression.
     
-    def __init__(self, model_path: str = None, task_type: str = "regression", max_samples: int = None):
+    Uses TabPFN's built-in subsample API for efficient ensemble diversity.
+    """
+    
+    def __init__(
+        self,
+        model_path: str = None,
+        task_type: str = "regression",
+        max_samples: int = None,
+        n_estimators: int = 8,
+        device: str = "cuda"
+    ):
         if model_path is None:
              raise ValueError("CustomTabPFN requires a model_path pointing to the TabPFN directory.")
         self.model_path = model_path
         self.task_type = task_type
-        self.max_samples = max_samples  # Maximum samples to use for training
+        self.max_samples = max_samples  # Maximum samples per estimator (handled by TabPFN internally)
+        self.n_estimators = n_estimators
+        self.device = device
         self.model = None
 
     def fit(self, X: pd.DataFrame, y: pd.Series, **kwargs):
-        """Fit the TabPFN model with optional random sampling."""
-        # Apply random sampling if dataset exceeds max_samples
-        if self.max_samples is not None and len(X) > self.max_samples:
-            print(f"Sampling {self.max_samples} from {len(X)} samples for TabPFN training...")
-            indices = np.random.choice(len(X), size=self.max_samples, replace=False)
-            X = X.iloc[indices].reset_index(drop=True)
-            y = y.iloc[indices].reset_index(drop=True)
+        """Fit the TabPFN model using its built-in subsample mechanism.
+        
+        Each of the n_estimators will independently subsample max_samples from the data,
+        providing ensemble diversity without manual preprocessing.
+        """
+        # Configure inference_config for TabPFN's internal subsampling
+        inference_config = {}
+        if self.max_samples is not None:
+            # Let TabPFN handle subsampling internally for each estimator
+            inference_config['SUBSAMPLE_SAMPLES'] = self.max_samples
+            print(f"TabPFN will subsample {self.max_samples} samples per estimator from {len(X)} total samples")
         
         # Choose the appropriate TabPFN model based on task type
         if self.task_type == "regression":
-            regressor_model_path = self.model_path
-            self.model = TabPFNRegressor(model_path=regressor_model_path)
+            self.model = TabPFNRegressor(
+                model_path=self.model_path,
+                n_estimators=self.n_estimators,
+                ignore_pretraining_limits=True,  # Allow datasets larger than 10K samples
+                inference_config=inference_config if inference_config else None,
+                device=self.device
+            )
         else:
-            classifier_model_path = self.model_path
-            self.model = TabPFNClassifier(model_path=classifier_model_path)
+            self.model = TabPFNClassifier(
+                model_path=self.model_path,
+                n_estimators=self.n_estimators,
+                ignore_pretraining_limits=True,  # Allow datasets larger than 10K samples
+                inference_config=inference_config if inference_config else None,
+                device=self.device
+            )
         
         self.model.fit(X, y)
 

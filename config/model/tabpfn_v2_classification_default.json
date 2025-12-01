@@ -1,0 +1,6 @@
+{
+    "model_name": "tabpfn",
+    "model_path": "/root/.cache/tabpfn/tabpfn-v2-classifier-finetuned-zk73skhh.ckpt",
+    "max_samples": 10000,
+    "batch_size": 5000
+}

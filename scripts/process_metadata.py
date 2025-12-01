@@ -103,8 +103,7 @@ def build_task_metadata(original_meta: Dict[str, Any], task: Dict[str, Any]) -> 
 	#   - item-ltv: product.item-ltv
 	key_mappings = [{task_pk: f"{target_table}.{table_pk}"}]
 	task_type = task.get("task_type")
-	if task_type == "classification":
-		task_type = "binary"
+	evaluation_metric = task.get("evaluation_metric")
 
 	task_metadata = {
 		"task_name": task_name,
@@ -114,6 +113,7 @@ def build_task_metadata(original_meta: Dict[str, Any], task: Dict[str, Any]) -> 
 		"target_column": task.get("target_column"),
 		"time_column": task.get("time_column"),
 		"task_type": task_type,
+		"evaluation_metric": evaluation_metric
 	}
 
 	return task_metadata
@@ -166,6 +166,6 @@ def parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_name", required=True)
-    parser.add_argument("--root_dir", default="/root/autodl-tmp/tabpfn_data")
+    parser.add_argument("--root_dir", default="/root/autodl-tmp/4dbinfer")
     args = parser.parse_args()
     transform_dataset_metadata(Path(args.root_dir) / args.dataset_name)

@@ -6,8 +6,7 @@ from typing import Tuple, Optional, Dict, Any
 import numpy as np
 import pandas as pd
 import yaml
-# Note: fastdfs is imported lazily inside load_dataset to avoid import-time dependency
-
+from fastdfs import load_rdb
 
 def _read_npz_df(file_path: Path) -> pd.DataFrame:
     """Read a .npz file and convert to DataFrame."""
@@ -27,27 +26,27 @@ def load_dataset(rdb_data_path: str, task_data_path: str) -> Tuple[pd.DataFrame,
         Tuple of (train_df, test_df, metadata, rdb)
     """
     # Load RDB (lazy, dynamic import to avoid static dependency issues)
-    import importlib
-    fastdfs_api = importlib.import_module("fastdfs.api")
-    rdb = fastdfs_api.load_rdb(rdb_data_path)
-    
-    # Load task data (supports .pqt or .npz)
+    rdb = load_rdb(rdb_data_path)
     task_path = Path(task_data_path)
-    train_pqt = task_path / "train.pqt"
-    test_pqt = task_path / "test.pqt"
-    train_npz = task_path / "train.npz"
-    test_npz = task_path / "test.npz"
+    
+    # Find files ending with train.pqt/test.pqt or train.npz/test.npz
+    train_pqt_files = list(task_path.glob("*train.pqt"))
+    test_pqt_files = list(task_path.glob("*test.pqt"))
+    train_npz_files = list(task_path.glob("*train.npz"))
+    test_npz_files = list(task_path.glob("*test.npz"))
 
-    if train_pqt.exists() and test_pqt.exists():
-        train_df = pd.read_parquet(train_pqt)
-        test_df = pd.read_parquet(test_pqt)
-    elif train_npz.exists() and test_npz.exists():
-        train_df = _read_npz_df(train_npz)
-        test_df = _read_npz_df(test_npz)
+    if train_pqt_files and test_pqt_files:
+        # Use the first match
+        train_df = pd.read_parquet(train_pqt_files[0])
+        test_df = pd.read_parquet(test_pqt_files[0])
+    elif train_npz_files and test_npz_files:
+        # Use the first match
+        train_df = _read_npz_df(train_npz_files[0])
+        test_df = _read_npz_df(test_npz_files[0])
     else:
         raise FileNotFoundError(
             f"Could not find train/test as .pqt or .npz in {task_path}. "
-            "Expected 'train.pqt' & 'test.pqt' or 'train.npz' & 'test.npz'."
+            "Expected files ending with 'train.pqt' & 'test.pqt' or 'train.npz' & 'test.npz'."
         )
     
     # Load metadata
