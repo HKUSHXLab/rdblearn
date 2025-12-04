@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 from multitabfm.api import train_and_predict
-from multitabfm.model import CustomLimiX, CustomTabPFN,CustomMLP
+from multitabfm.model import CustomLimiX, CustomTabPFN
 
 def load_config(path: Path) -> dict:
     with open(path, "r") as f:
@@ -12,14 +12,13 @@ def load_config(path: Path) -> dict:
 def main():
     """Train + predict with LimiX using the convenience API."""
     dfs_config = load_config("/root/yl_project/multitabfm/config/dfs/dfs_default.json")
-    model_config = load_config("/root/yl_project/multitabfm/config/model/tabpfn_v2_classification_default.json")
-    # model_config = load_config("/root/yl_project/multitabfm/config/model/mlp_default.json")
+    model_config = load_config("/root/yl_project/multitabfm/config/model/tabpfn_v2_regression_default.json")
+    # model_config = load_config("/root/yl_project/multitabfm/config/model/tabpfn_v2.5_classification_default.json")
     
     # Map model_name to class
     model_map = {
         "tabpfn": CustomTabPFN,
-        "limix": CustomLimiX,
-        "mlp": CustomMLP
+        "limix": CustomLimiX
     }
     
     model_name = model_config["model_name"]
@@ -30,8 +29,10 @@ def main():
         raise ValueError(f"Unknown model_name: {model_name}. Supported: {list(model_map.keys())}")
 
     preds, metrics = train_and_predict(
-        rdb_data_path="/root/autodl-tmp/4dbinfer/stackexchange",
-        task_data_path="/root/autodl-tmp/4dbinfer/stackexchange/upvote",
+        rdb_data_path="/root/autodl-tmp/4dbinfer/outbrain-small",
+        task_data_path="/root/autodl-tmp/4dbinfer/outbrain-small/ctr",
+        # rdb_data_path="/root/autodl-tmp/tabpfn_data/rel-avito",
+        # task_data_path="/root/autodl-tmp/tabpfn_data/rel-avito/user-visits",
         dfs_config=dfs_config,
         model_config=model_config,
     )
