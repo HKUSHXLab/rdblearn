@@ -1,7 +1,7 @@
 from typing import Optional, List, Union
 import pandas as pd
 import numpy as np
-from sklearn.metrics import roc_auc_score, log_loss, mean_squared_error, mean_absolute_error, r2_score
+from sklearn.metrics import roc_auc_score, log_loss, mean_squared_error, mean_absolute_error, r2_score, accuracy_score
 
 
 def _to_proba_df(proba: Union[pd.DataFrame, np.ndarray, pd.Series]) -> pd.DataFrame:
@@ -73,81 +73,107 @@ def compute_metrics(labels: pd.Series, preds_or_proba: Union[pd.DataFrame, np.nd
     """
     metrics = metrics or ["accuracy"]
 
-    # Heuristic: if DataFrame with 2+ columns -> classification probabilities
-    # If 1D array/series -> treat as regression predictions unless classification metrics requested only.
-    is_df = isinstance(preds_or_proba, pd.DataFrame)
-    arr = np.asarray(preds_or_proba) if not is_df else None
-    is_1d = (not is_df) and (arr.ndim == 1)
-
     cls_metrics = {"accuracy", "auroc", "logloss"}
     reg_metrics = {"rmse", "mse", "mae", "r2"}
 
     results: dict = {}
 
-    if is_df:
+    # Determine if we should run classification or regression logic based on requested metrics
+    run_cls = any(m in cls_metrics for m in metrics)
+    run_reg = any(m in reg_metrics for m in metrics)
+
+    # If neither is explicitly requested (e.g. custom metric or empty), fallback to shape inference
+    if not run_cls and not run_reg:
+        is_df = isinstance(preds_or_proba, pd.DataFrame)
+        arr = np.asarray(preds_or_proba) if not is_df else None
+        if is_df or (arr.ndim == 2):
+            run_cls = True
+        else:
+            run_reg = True
+
+    if run_cls:
         # Classification path
-        proba_df = _to_proba_df(preds_or_proba)
-        y_true = _coerce_labels_dtype(labels, proba_df)
+        try:
+            proba_df = _to_proba_df(preds_or_proba)
+            y_true = _coerce_labels_dtype(labels, proba_df)
 
-        if "accuracy" in metrics:
-            try:
-                y_pred = proba_df.idxmax(axis=1)
+            if "accuracy" in metrics:
                 try:
-                    y_pred = y_pred.astype(y_true.dtype)
+                    y_pred = proba_df.idxmax(axis=1)
+                    
+                    # Align indices and filter NaNs
+                    y_true_aligned = y_true.reset_index(drop=True)
+                    y_pred_aligned = y_pred.reset_index(drop=True)
+                    
+                    mask = y_true_aligned.notna()
+                    y_true_clean = y_true_aligned[mask]
+                    y_pred_clean = y_pred_aligned[mask]
+
+                    try:
+                        y_pred_clean = y_pred_clean.astype(y_true_clean.dtype)
+                    except Exception:
+                        pass
+                    results["accuracy"] = float(accuracy_score(y_true_clean, y_pred_clean))
+                except Exception as e:
+                    print(f"Error computing accuracy: {e}")
+                    results["accuracy"] = None
+
+            if "auroc" in metrics:
+                try:
+                    classes = list(proba_df.columns)
+                    n_classes = len(classes)
+                    if n_classes == 2:
+                        pos_col = _binary_positive_col(y_true, proba_df)
+                        y_score = proba_df[pos_col].to_numpy()
+                        results["auroc"] = float(roc_auc_score(y_true.to_numpy(), y_score))
+                    else:
+                        y_score = proba_df.to_numpy()
+                        results["auroc"] = float(
+                            roc_auc_score(y_true.to_numpy(), y_score, multi_class="ovr", average="macro", labels=classes)
+                        )
                 except Exception:
-                    pass
-                results["accuracy"] = float((y_pred.to_numpy() == y_true.to_numpy()).mean())
-            except Exception:
-                results["accuracy"] = None
+                    results["auroc"] = None
 
-        if "auroc" in metrics:
-            try:
-                classes = list(proba_df.columns)
-                n_classes = len(classes)
-                if n_classes == 2:
-                    pos_col = _binary_positive_col(y_true, proba_df)
-                    y_score = proba_df[pos_col].to_numpy()
-                    results["auroc"] = float(roc_auc_score(y_true.to_numpy(), y_score))
-                else:
-                    y_score = proba_df.to_numpy()
-                    results["auroc"] = float(
-                        roc_auc_score(y_true.to_numpy(), y_score, multi_class="ovr", average="macro", labels=classes)
-                    )
-            except Exception:
-                results["auroc"] = None
+            if "logloss" in metrics:
+                try:
+                    classes = list(proba_df.columns)
+                    results["logloss"] = float(log_loss(y_true.to_numpy(), proba_df.to_numpy(), labels=classes))
+                except Exception:
+                    results["logloss"] = None
+        except Exception:
+            pass
 
-        if "logloss" in metrics:
-            try:
-                classes = list(proba_df.columns)
-                results["logloss"] = float(log_loss(y_true.to_numpy(), proba_df.to_numpy(), labels=classes))
-            except Exception:
-                results["logloss"] = None
-
-    elif is_1d:
+    if run_reg:
         # Regression path
-        y_true = labels.to_numpy()
-        y_pred = np.asarray(preds_or_proba)
+        try:
+            y_true = labels.to_numpy()
+            if isinstance(preds_or_proba, pd.DataFrame):
+                y_pred = preds_or_proba.values.ravel()
+            else:
+                y_pred = np.asarray(preds_or_proba).ravel()
 
-        if "mse" in metrics:
-            try:
-                results["mse"] = float(mean_squared_error(y_true, y_pred))
-            except Exception:
-                results["mse"] = None
-        if "rmse" in metrics:
-            try:
-                results["rmse"] = float(np.sqrt(mean_squared_error(y_true, y_pred)))
-            except Exception:
-                results["rmse"] = None
-        if "mae" in metrics:
-            try:
-                results["mae"] = float(mean_absolute_error(y_true, y_pred))
-            except Exception:
-                results["mae"] = None
-        if "r2" in metrics:
-            try:
-                results["r2"] = float(r2_score(y_true, y_pred))
-            except Exception:
-                results["r2"] = None
+            if "mse" in metrics:
+                try:
+                    results["mse"] = float(mean_squared_error(y_true, y_pred))
+                except Exception:
+                    results["mse"] = None
+            if "rmse" in metrics:
+                try:
+                    results["rmse"] = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+                except Exception:
+                    results["rmse"] = None
+            if "mae" in metrics:
+                try:
+                    results["mae"] = float(mean_absolute_error(y_true, y_pred))
+                except Exception:
+                    results["mae"] = None
+            if "r2" in metrics:
+                try:
+                    results["r2"] = float(r2_score(y_true, y_pred))
+                except Exception:
+                    results["r2"] = None
+        except Exception:
+            pass
 
     # Fill any requested metrics not computed with None
     for m in metrics:

@@ -35,7 +35,10 @@ class CustomTabPFN:
         task_type: str = "regression",
         max_samples: int = None,
         n_estimators: int = 8,
-        device: str = "cuda"
+        device: str = "cuda",
+        n_preprocessing_jobs: int = -1,
+        eval_metric: str = None,
+        **kwargs
     ):
         if model_path is None:
              raise ValueError("CustomTabPFN requires a model_path pointing to the TabPFN directory.")
@@ -44,6 +47,8 @@ class CustomTabPFN:
         self.max_samples = max_samples  # Maximum samples per estimator (handled by TabPFN internally)
         self.n_estimators = n_estimators
         self.device = device
+        self.n_preprocessing_jobs = n_preprocessing_jobs
+        self.eval_metric = eval_metric
         self.model = None
 
     def fit(self, X: pd.DataFrame, y: pd.Series, **kwargs):
@@ -66,7 +71,8 @@ class CustomTabPFN:
                 n_estimators=self.n_estimators,
                 ignore_pretraining_limits=True,  # Allow datasets larger than 10K samples
                 inference_config=inference_config if inference_config else None,
-                device=self.device
+                device=self.device,
+                n_preprocessing_jobs=self.n_preprocessing_jobs
             )
         else:
             self.model = TabPFNClassifier(
@@ -74,10 +80,12 @@ class CustomTabPFN:
                 n_estimators=self.n_estimators,
                 ignore_pretraining_limits=True,  # Allow datasets larger than 10K samples
                 inference_config=inference_config if inference_config else None,
-                device=self.device
+                device=self.device,
+                n_preprocessing_jobs=self.n_preprocessing_jobs
             )
         
         self.model.fit(X, y)
+
 
     def predict_proba(self, X: pd.DataFrame, **kwargs) -> pd.DataFrame:
         """Predict class probabilities. Always returns DataFrame."""
@@ -110,7 +118,14 @@ class CustomTabPFN:
         if self.model is None:
             raise RuntimeError("Model not trained. Call fit() first.")
             
-        preds = self.model.predict(X, output_type="median" if self.task_type == "regression" else None)
+        output_type = None
+        if self.task_type == "regression":
+            if self.eval_metric == "mae":
+                output_type = "median"
+            else:
+                output_type = "mean"
+
+        preds = self.model.predict(X, output_type=output_type)
         
         # Ensure Series output
         if isinstance(preds, pd.Series):
@@ -178,21 +193,7 @@ class CustomLimiX:
 
     def fit(self, X: Union[pd.DataFrame, np.ndarray], y: Union[pd.Series, np.ndarray], **_) -> None:
         """Store training data so LimiX can perform retrieval-based inference later."""
-        # Apply random sampling if dataset exceeds max_samples
-        if self.max_samples is not None and len(X) > self.max_samples:
-            print(f"Sampling {self.max_samples} from {len(X)} samples for LimiX training...")
-            if isinstance(X, pd.DataFrame):
-                indices = np.random.choice(len(X), size=self.max_samples, replace=False)
-                X = X.iloc[indices].reset_index(drop=True)
-                if isinstance(y, pd.Series):
-                    y = y.iloc[indices].reset_index(drop=True)
-                else:
-                    y = y[indices]
-            else:
-                indices = np.random.choice(len(X), size=self.max_samples, replace=False)
-                X = X[indices]
-                y = y[indices]
-
+        
         X_arr, _ = self._prepare_features(X)
         y_arr = self._prepare_targets(y)
         if X_arr.shape[0] != y_arr.shape[0]:

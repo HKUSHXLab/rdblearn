@@ -66,6 +66,7 @@ class MultiTabFM:
         # Add task_type to model config
         model_config = self.model_config.copy()
         model_config['task_type'] = task_type
+        model_config['eval_metric'] = eval_metric
         
         # Use custom model class if provided, otherwise default to CustomTabPFN
         model_class = self.custom_model_class or CustomTabPFN
@@ -106,6 +107,12 @@ class MultiTabFM:
         # Load dataset
         train_data, test_data, metadata, rdb = load_dataset(rdb_data_path, task_data_path)
         
+        # Sampling target_table if max_samples is set
+        max_samples = self.model_config.get('max_samples')
+        if max_samples is not None and len(train_data) > max_samples:
+            print(f"Sampling {max_samples} from {len(train_data)} samples for training before DFS...")
+            train_data = train_data.sample(n=max_samples, random_state=42).reset_index(drop=True)
+
         # Parse metadata
         key_mappings = {k: v for d in metadata['key_mappings'] for k, v in d.items()}
         time_column = metadata['time_column']
@@ -154,6 +161,8 @@ class MultiTabFM:
             Y_train.reset_index(drop=True), 
             test_features.reset_index(drop=True)
         )
+        # save X_train_transformed
+        X_train_transformed.to_parquet('/root/yl_project/multitabfm/debug/X_train_transformed.pqt', index=False)
         train_data = pd.concat([X_train_transformed, y_train_transformed], axis=1)
         # 2. Train model
         self.fit(train_data, label_column=target_column, task_type=task_type, eval_metric=eval_metrics[0] if eval_metrics else None)

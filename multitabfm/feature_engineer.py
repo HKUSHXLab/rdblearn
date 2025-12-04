@@ -8,6 +8,7 @@ from typing import Optional, List, Tuple, Union, Set
 import pandas as pd
 import numpy as np
 import warnings
+from sklearn.preprocessing import LabelEncoder
 from autogluon.features.generators import AutoMLPipelineFeatureGenerator
 from autogluon.core.data import LabelCleaner
 from autogluon.core.utils import infer_problem_type
@@ -18,6 +19,7 @@ def generate_features(
     rdb,
     key_mappings: dict,
     time_column: str,
+    pipeline: fastdfs.DFSPipeline,
     dfs_config: Optional[Union[dict, DFSConfig]] = None,
 ) -> pd.DataFrame:
     """Generate DFS features using fastdfs.api.compute_dfs_features.
@@ -40,15 +42,6 @@ def generate_features(
         for key, value in dfs_config.items():
             if hasattr(effective_config, key):
                 setattr(effective_config, key, value)
-
-    pipeline = fastdfs.DFSPipeline(
-                # transform_pipeline=None,  # No transforms for this test
-                transform_pipeline=RDBTransformPipeline([
-                    HandleDummyTable(),
-                    RDBTransformWrapper(FeaturizeDatetime(features=["year", "month", "day", "hour", "dayofweek"])), #, cyclic=cyclic)),
-                ]),
-                dfs_config=effective_config
-            )
     
     features = pipeline.compute_features(
         rdb=rdb,
@@ -215,3 +208,5 @@ def ag_transform(
         X_test_transformed = feature_generator.transform(X_test)
     
     return X_train_transformed, y_train_transformed, X_test_transformed
+
+
