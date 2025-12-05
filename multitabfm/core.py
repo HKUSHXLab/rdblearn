@@ -1,6 +1,14 @@
 from typing import Optional, List, Tuple, Union
 import pandas as pd
 import numpy as np
+from sklearn.preprocessing import StandardScaler, QuantileTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+
+import fastdfs
+from fastdfs.transform import RDBTransformWrapper, RDBTransformPipeline, HandleDummyTable, FeaturizeDatetime
+from fastdfs.api import compute_dfs_features
+from fastdfs.dfs import DFSConfig
 
 from .feature_engineer import generate_features, prepare_feature_inputs, merge_original_and_dfs, ag_transform
 from .model import CustomTabPFN
@@ -22,6 +30,7 @@ class MultiTabFM:
             
         self.custom_model_class = self.model_config.pop('custom_model_class', None)
         self.model = None
+        self.target_scaler = None
 
     def _batch_predict_proba(self, X: pd.DataFrame, batch_size: int) -> pd.DataFrame:
         """Batch-wise probability prediction. Returns DataFrame."""
@@ -73,6 +82,26 @@ class MultiTabFM:
         
         # Initialize and fit the model
         self.model = model_class(**model_config)
+
+        # Target Normalization for Regression
+        if task_type == "regression" and self.model.__class__.__name__ != "AutoGluon":
+            y_train_np = labels.to_numpy().reshape(-1, 1)
+            skew_score = pd.Series(y_train_np.flatten()).skew()
+            if np.abs(skew_score) > 0.99:
+                 self.target_scaler = Pipeline(steps=[
+                    ('imputer', SimpleImputer(strategy="median")),
+                    ('scaler', QuantileTransformer(output_distribution='normal'))])
+            else:
+                self.target_scaler = Pipeline(steps=[
+                    ('imputer', SimpleImputer(strategy="median")),
+                    ('scaler', StandardScaler())])
+            
+            labels = pd.Series(
+                self.target_scaler.fit_transform(y_train_np).flatten(),
+                index=labels.index,
+                name=labels.name
+            )
+
         self.model.fit(X=features, y=labels)
 
     def predict_proba(self, test_features: pd.DataFrame) -> pd.DataFrame:
@@ -85,7 +114,16 @@ class MultiTabFM:
         """Predict target values using batch processing."""
         if self.model is None:
             raise RuntimeError("Model not trained. Call fit() first.")
-        return self._batch_predict(test_features, self.batch_size)
+        preds = self._batch_predict(test_features, self.batch_size)
+        
+        if self.target_scaler is not None:
+            preds_np = preds.to_numpy().reshape(-1, 1)
+            # Only inverse transform using the scaler step, skipping the imputer
+            preds = pd.Series(
+                self.target_scaler.named_steps['scaler'].inverse_transform(preds_np).flatten(),
+                index=preds.index
+            )
+        return preds
 
     def evaluate(self, labels: pd.Series, preds_or_proba: Union[pd.DataFrame, np.ndarray, pd.Series], metrics: Optional[List[str]] = None) -> dict:
         """Evaluate predictions against true labels for classification or regression."""
@@ -134,12 +172,29 @@ class MultiTabFM:
             dfs_input_cols,
         ) = prepare_feature_inputs(X_train, X_test, key_mappings, time_column)
 
+
+        effective_config = DFSConfig()
+        if self.dfs_config:
+            for key, value in self.dfs_config.items():
+                if hasattr(effective_config, key):
+                    setattr(effective_config, key, value)
+
+        pipeline = fastdfs.DFSPipeline(
+                # transform_pipeline=None,  # No transforms for this test
+                transform_pipeline=RDBTransformPipeline([
+                    HandleDummyTable(),
+                    RDBTransformWrapper(FeaturizeDatetime(features=["year", "month", "day", "hour", "dayofweek"])), #, cyclic=cyclic)),
+                ]),
+                dfs_config=effective_config
+            )
+
         if self.dfs_config:
             train_dfs = generate_features(
                 sanitized_train,
                 rdb,
                 key_mappings,
                 time_column,
+                pipeline,
                 self.dfs_config,
             )
             test_dfs = generate_features(
@@ -147,6 +202,7 @@ class MultiTabFM:
                 rdb,
                 key_mappings,
                 time_column,
+                pipeline,
                 self.dfs_config,
             )
 
@@ -161,6 +217,7 @@ class MultiTabFM:
             Y_train.reset_index(drop=True), 
             test_features.reset_index(drop=True)
         )
+
         # save X_train_transformed
         X_train_transformed.to_parquet('/root/yl_project/multitabfm/debug/X_train_transformed.pqt', index=False)
         train_data = pd.concat([X_train_transformed, y_train_transformed], axis=1)

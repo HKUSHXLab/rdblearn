@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 from tabpfn import TabPFNClassifier, TabPFNRegressor
+from autogluon.tabular import TabularDataset, TabularPredictor
 
 
 LIMIX_ROOT = Path("/root/yl_project/LimiX")
@@ -120,10 +121,11 @@ class CustomTabPFN:
             
         output_type = None
         if self.task_type == "regression":
-            if self.eval_metric == "mae":
-                output_type = "median"
-            else:
-                output_type = "mean"
+            output_type = "median"
+            # if self.eval_metric == "mae":
+            #     output_type = "median"
+            # else:
+            #     output_type = "mean"
 
         preds = self.model.predict(X, output_type=output_type)
         
@@ -132,7 +134,6 @@ class CustomTabPFN:
             return preds
         else:
             return pd.Series(np.asarray(preds))
-
 
 class CustomLimiX:
     """Wrapper around LimiXPredictor to expose a sklearn-like API."""
@@ -277,4 +278,131 @@ class CustomLimiX:
 
     def _ensure_fitted(self) -> None:
         if not self._is_fitted or self.X_train_ is None or self.y_train_processed_ is None or self.model is None:
+            raise RuntimeError("Model not trained. Call fit() first.")
+
+class AutoGluon:
+    """Wrapper around AutoGluon TabularPredictor with full model suite."""
+    
+    def __init__(
+        self,
+        task_type: str = "classification",
+        eval_metric: str = None,
+        time_limit: int = None,
+        use_ensembling: bool = True,
+        use_feature_generator: bool = True,
+        presets: str = None,
+        hyperparameters: dict = None,
+        num_gpus: int = 0,
+        verbosity: int = 2,
+        **kwargs
+    ):
+        self.task_type = task_type.lower()
+        if self.task_type not in {"classification", "regression"}:
+            raise ValueError("task_type must be 'classification' or 'regression'.")
+        
+        self.problem_type = "binary" if self.task_type == "classification" else "regression"
+        self.eval_metric = eval_metric
+        self.time_limit = time_limit
+        self.use_ensembling = use_ensembling
+        self.use_feature_generator = use_feature_generator
+        self.presets = presets
+        self.hyperparameters = hyperparameters
+        self.num_gpus = num_gpus
+        self.verbosity = verbosity
+        self.predictor_kwargs = kwargs
+        self.predictor: Optional[TabularPredictor] = None
+        self._is_fitted = False
+    
+    def fit(
+        self, 
+        X: Union[pd.DataFrame, np.ndarray], 
+        y: Union[pd.Series, np.ndarray],
+        **kwargs
+    ):
+        """Fit the AutoGluon model using full model suite."""
+        # Prepare training data
+        if isinstance(X, np.ndarray):
+            X = pd.DataFrame(X)
+        if isinstance(y, np.ndarray):
+            y = pd.Series(y)
+        
+        train_data = X.copy()
+        train_data['target'] = y.values
+        
+        # Configure ensembling
+        extra_kwargs = {}
+        if not self.use_ensembling:
+            extra_kwargs['auto_stack'] = False
+            extra_kwargs['num_bag_folds'] = 0
+            extra_kwargs['num_bag_sets'] = 1
+            extra_kwargs['num_stack_levels'] = 0
+        else:
+            # Only set these if presets is NOT provided, as presets usually handle this
+            if not self.presets:
+                extra_kwargs['auto_stack'] = True
+                extra_kwargs['use_bag_holdout'] = True
+        
+        if not self.use_feature_generator:
+            extra_kwargs['feature_generator'] = None
+        
+        if self.presets:
+            extra_kwargs['presets'] = self.presets
+
+        if self.hyperparameters:
+            extra_kwargs['hyperparameters'] = self.hyperparameters
+        
+        # Initialize predictor
+        self.predictor = TabularPredictor(
+            label='target',
+            problem_type=self.problem_type,
+            eval_metric=self.eval_metric,
+            verbosity=self.verbosity,
+            **self.predictor_kwargs
+        )
+        
+        # Fit the model
+        self.predictor.fit(
+            train_data,
+            time_limit=self.time_limit,
+            num_gpus=self.num_gpus,
+            **extra_kwargs,
+            **{k: v for k, v in kwargs.items() if k not in ['hyperparameters', 'presets']}
+        )
+        
+        self._is_fitted = True
+    
+    def predict(self, X: Union[pd.DataFrame, np.ndarray], **kwargs) -> pd.Series:
+        """Predict target values."""
+        self._ensure_fitted()
+        
+        if isinstance(X, np.ndarray):
+            X = pd.DataFrame(X)
+        
+        preds = self.predictor.predict(X, **kwargs)
+        
+        if not isinstance(preds, pd.Series):
+            preds = pd.Series(preds)
+        
+        return preds
+    
+    def predict_proba(self, X: Union[pd.DataFrame, np.ndarray], **kwargs) -> pd.DataFrame:
+        """Predict class probabilities for classification tasks."""
+        self._ensure_fitted()
+        
+        if self.task_type != "classification":
+            raise NotImplementedError("predict_proba is only available for classification tasks.")
+        
+        if isinstance(X, np.ndarray):
+            X = pd.DataFrame(X)
+        
+        proba = self.predictor.predict_proba(X, **kwargs)
+        
+        if not isinstance(proba, pd.DataFrame):
+            proba = pd.DataFrame(proba)
+        
+        return proba
+    
+    def _ensure_fitted(self):
+        """Check if the model has been fitted."""
+        if not self._is_fitted or self.predictor is None:
             raise RuntimeError("Model not trained. Call fit() first.")
