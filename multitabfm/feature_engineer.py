@@ -102,89 +102,112 @@ def _coerce_array_columns_to_strings(df: pd.DataFrame, columns: List[str]) -> pd
             result[col] = result[col].apply(_to_string)
     return result
 
-def merge_original_and_dfs(
-    original: pd.DataFrame,
-    dfs_features: pd.DataFrame,
-    dfs_input_cols: List[str]
-) -> pd.DataFrame:
-    """Append DFS-produced features back onto the original frame."""
-    extra_features = dfs_features.drop(columns=dfs_input_cols, errors="ignore")
-    combined = pd.concat([
-        original.reset_index(drop=True),
-        extra_features.reset_index(drop=True)
-    ], axis=1)
-    return combined
-
-
-def prepare_feature_inputs(
+def prepare_for_dfs(
     X_train: pd.DataFrame,
     X_test: pd.DataFrame,
     key_mappings: dict,
     time_column: Optional[str]
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, List[str]]:
-    """Shared preprocessing for DFS-enabled and vanilla flows."""
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Remove array-valued columns that would break DFS joins.
+    
+    Args:
+        X_train: Training features dataframe
+        X_test: Test features dataframe
+        key_mappings: Dict mapping local columns to RDB table.column
+        time_column: Name of the time/cutoff column
+        
+    Returns:
+        Tuple of (sanitized_train, sanitized_test) ready for DFS
+    """
     protected_cols = set(key_mappings.keys())
     if time_column:
         protected_cols.add(time_column)
-
+    
     sanitized_train, dropped_train = _filter_array_columns(X_train, protected_cols)
     sanitized_test, dropped_test = _filter_array_columns(X_test, protected_cols)
     dropped_columns = sorted(set(dropped_train) | set(dropped_test))
-
+    
     if dropped_columns:
         warnings.warn(
             "Excluded array-valued columns from DFS input: "
             + ", ".join(dropped_columns)
         )
-
-    coerced_train = _coerce_array_columns_to_strings(X_train, dropped_columns)
-    coerced_test = _coerce_array_columns_to_strings(X_test, dropped_columns)
-
-    dfs_input_cols = list(sanitized_train.columns)
-    return coerced_train, coerced_test, sanitized_train, sanitized_test, dfs_input_cols
+    
+    return sanitized_train, sanitized_test
 
 
-def merge_original_and_dfs(
+def add_dfs_features(
     original: pd.DataFrame,
-    dfs_features: pd.DataFrame,
-    dfs_input_cols: List[str]
+    dfs_features: pd.DataFrame
 ) -> pd.DataFrame:
-    """Append DFS-produced features back onto the original frame."""
-    extra_features = dfs_features.drop(columns=dfs_input_cols, errors="ignore")
-    combined = pd.concat([
-        original.reset_index(drop=True),
-        extra_features.reset_index(drop=True)
-    ], axis=1)
-    return combined
-
-
-def ag_transform(
-    X_train: pd.DataFrame,
-    y_train: pd.Series,
-    X_test: Optional[pd.DataFrame] = None,
-    feature_generator_config: Optional[dict] = None
-) -> Tuple[pd.DataFrame, pd.Series, Optional[pd.DataFrame], AutoMLPipelineFeatureGenerator, LabelCleaner, str]:
-    """
-    Transform features and labels using AutoGluon's feature generator and label cleaner.
+    """Add DFS features to original dataframe, avoiding duplicates.
     
     Args:
-        X_train: Training features dataframe
-        y_train: Training labels series
-        X_test: Optional test features dataframe
-        feature_generator_config: Optional config for AutoMLPipelineFeatureGenerator
+        original: Original dataframe with all features
+        dfs_features: DFS-generated features dataframe
         
     Returns:
-        Tuple of (X_train_transformed, y_train_transformed, X_test_transformed, 
-                 feature_generator, label_cleaner, problem_type)
+        Combined dataframe with original features + new DFS features
     """
-    # Infer problem type if not provided
+    # Get only new columns from DFS output (avoid duplicates)
+    new_cols = [col for col in dfs_features.columns if col not in original.columns]
+    return pd.concat([
+        original.reset_index(drop=True),
+        dfs_features[new_cols].reset_index(drop=True)
+    ], axis=1)
+
+
+def ag_label_transform(
+    y_train: pd.Series,
+    y_test: Optional[pd.Series] = None
+) -> Tuple[pd.Series, Optional[pd.Series]]:
+    """
+    Transform labels using AutoGluon's LabelCleaner.
+    
+    Args:
+        y_train: Training labels series
+        y_test: Optional test labels series
+        
+    Returns:
+        Tuple of (y_train_transformed, y_test_transformed)
+    """
+    # Infer problem type
     problem_type = infer_problem_type(y_train)
     
     # Setup label cleaner
     label_cleaner = LabelCleaner.construct(problem_type=problem_type, y=y_train)
+    
+    # Transform training labels
     y_train_transformed = label_cleaner.transform(y_train)
     
-    # Setup feature generator with default config
+    # Transform test labels if provided
+    y_test_transformed = None
+    if y_test is not None:
+        y_test_transformed = label_cleaner.transform(y_test)
+    
+    return y_train_transformed, y_test_transformed
+
+
+def ag_transform(
+    X_train: pd.DataFrame,
+    X_test: Optional[pd.DataFrame] = None,
+    feature_generator_config: Optional[dict] = None
+) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
+    """
+    Transform features using categorical conversion and AutoGluon's feature generator.
+    
+    Args:
+        X_train: Training features dataframe
+        X_test: Optional test features dataframe
+        feature_generator_config: Optional config for AutoMLPipelineFeatureGenerator
+        
+    Returns:
+        Tuple of (X_train_transformed, X_test_transformed)
+    """
+    # Step 1: Convert categorical columns to numeric to avoid ag dropping high cardinality categoricals
+    X_train_numeric, X_test_numeric = convert_categoricals_to_numeric(X_train, X_test)
+    
+    # Step 2: Setup feature generator with default config
     default_config = {
         "enable_datetime_features": True,
         "enable_raw_text_features": False,
@@ -196,15 +219,15 @@ def ag_transform(
     
     feature_generator = AutoMLPipelineFeatureGenerator(**default_config)
     
-    # Transform training features
-    X_train_transformed = feature_generator.fit_transform(X_train)
+    # Step 3: Transform training features
+    X_train_transformed = feature_generator.fit_transform(X_train_numeric)
     
-    # Transform test features if provided
+    # Step 4: Transform test features if provided
     X_test_transformed = None
-    if X_test is not None:
-        X_test_transformed = feature_generator.transform(X_test)
+    if X_test_numeric is not None:
+        X_test_transformed = feature_generator.transform(X_test_numeric)
     
-    return X_train_transformed, y_train_transformed, X_test_transformed
+    return X_train_transformed, X_test_transformed
 
 
 def convert_categoricals_to_numeric(

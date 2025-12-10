@@ -10,7 +10,7 @@ from fastdfs.transform import RDBTransformWrapper, RDBTransformPipeline, HandleD
 from fastdfs.api import compute_dfs_features
 from fastdfs.dfs import DFSConfig
 
-from .feature_engineer import generate_features, prepare_feature_inputs, merge_original_and_dfs, ag_transform, convert_categoricals_to_numeric
+from .feature_engineer import generate_features, prepare_for_dfs, add_dfs_features, ag_transform, ag_label_transform
 from .model import CustomTabPFN
 from .evaluation import compute_metrics
 from .utils import load_dataset
@@ -143,75 +143,57 @@ class MultiTabFM:
         X_train, Y_train = train_data.drop(columns=[target_column]), train_data[target_column]
         X_test, Y_test = test_data.drop(columns=[target_column]), test_data[target_column]
 
-        (
-            base_train,
-            base_test,
-            sanitized_train,
-            sanitized_test,
-            dfs_input_cols,
-        ) = prepare_feature_inputs(X_train, X_test, key_mappings, time_column)
-
-
+        # Configure DFS pipeline
         effective_config = DFSConfig()
         if self.dfs_config:
             for key, value in self.dfs_config.items():
                 if hasattr(effective_config, key):
                     setattr(effective_config, key, value)
 
-        pipeline = fastdfs.DFSPipeline(
-                # transform_pipeline=None,  # No transforms for this test
+        # Apply DFS feature generation if enabled
+        if self.dfs_config:
+            pipeline = fastdfs.DFSPipeline(
                 transform_pipeline=RDBTransformPipeline([
                     HandleDummyTable(),
-                    RDBTransformWrapper(FeaturizeDatetime(features=["year", "month", "day", "hour", "dayofweek"])), #, cyclic=cyclic)),
+                    RDBTransformWrapper(FeaturizeDatetime(features=["year", "month", "day", "hour", "dayofweek"])),
                 ]),
                 dfs_config=effective_config
             )
-
-        if self.dfs_config:
-            train_dfs = generate_features(
-                sanitized_train,
-                rdb,
-                key_mappings,
-                time_column,
-                pipeline,
-                self.dfs_config,
-            )
-            test_dfs = generate_features(
-                sanitized_test,
-                rdb,
-                key_mappings,
-                time_column,
-                pipeline,
-                self.dfs_config,
-            )
-
-            train_features = merge_original_and_dfs(base_train, train_dfs, dfs_input_cols)
-            test_features = merge_original_and_dfs(base_test, test_dfs, dfs_input_cols)
+            # Prepare clean data for DFS (removes array-valued columns)
+            train_for_dfs, test_for_dfs = prepare_for_dfs(X_train, X_test, key_mappings, time_column)
+            
+            # Generate DFS features
+            train_dfs = generate_features(train_for_dfs, rdb, key_mappings, time_column, pipeline, self.dfs_config)
+            test_dfs = generate_features(test_for_dfs, rdb, key_mappings, time_column, pipeline, self.dfs_config)
+            
+            # Add DFS features to original data
+            train_features = add_dfs_features(X_train, train_dfs)
+            test_features = add_dfs_features(X_test, test_dfs)
         else:
-            train_features = base_train
-            test_features = base_test
+            train_features = X_train
+            test_features = X_test
         
-        # Convert categorical columns to numeric representationsm, to avoid ag_transform dropping high cardinality categoricals
-        train_features, test_features = convert_categoricals_to_numeric(
-            train_features, 
-            test_features
-        )
-        # Step 1: Apply ag_transform for feature engineering (datetime, categorical encoding, etc.)
-        X_train_transformed, y_train_transformed, X_test_transformed = ag_transform(
+        # Step 1: Apply ag_transform for feature engineering (categorical conversion, datetime, etc.)
+        X_train_transformed, X_test_transformed = ag_transform(
             train_features.reset_index(drop=True),
-            Y_train.reset_index(drop=True),
             test_features.reset_index(drop=True)
         )
-
-        # Step 2: Combine features and target for normalization
-        train_data = pd.concat([X_train_transformed, y_train_transformed], axis=1)
-        test_data = pd.concat([X_test_transformed, Y_test.reset_index(drop=True)], axis=1)
-        # train_data.to_parquet('/root/autodl-tmp/4dbinfer/amazon-single/rating/train.pqt', index=False)
-        # test_data.to_parquet('/root/autodl-tmp/4dbinfer/amazon-single/rating/test.pqt', index=False)
         
-        # Extract normalized features for prediction
-        X_test = test_data.drop(columns=[target_column])
-        Y_test = test_data[target_column]
+        # Step 2: Apply label transformation to both train and test labels
+        y_train_transformed, y_test_transformed = ag_label_transform(
+            Y_train.reset_index(drop=True),
+            Y_test.reset_index(drop=True)
+        )
+
+        # Step 3: Combine features and target
+        train_data = pd.concat([X_train_transformed, y_train_transformed], axis=1)
+        # test_data = pd.concat([X_test_transformed, y_test_transformed], axis=1)
+        # # train_data.to_parquet('/root/autodl-tmp/4dbinfer/amazon-single/rating/train.pqt', index=False)
+        # # test_data.to_parquet('/root/autodl-tmp/4dbinfer/amazon-single/rating/test.pqt', index=False)
+        
+        # # Extract normalized features for prediction
+        # X_test = test_data.drop(columns=[target_column])
+        # Y_test = test_data[target_column]
         
         # 2. Train model (data already normalized)
         self.fit(train_data, label_column=target_column, task_type=task_type,
@@ -219,15 +201,15 @@ class MultiTabFM:
 
         # 3. Predict (predictions will be in normalized space)
         if task_type == "regression":
-            preds_or_proba = self.predict(X_test)
+            preds_or_proba = self.predict(X_test_transformed)
         else:
-            preds_or_proba = self.predict_proba(X_test)
+            preds_or_proba = self.predict_proba(X_test_transformed)
 
         # 4. Evaluate on normalized scale (following tab2graph's approach)
         metrics = None
-        if eval_metrics and Y_test is not None:
+        if eval_metrics and y_test_transformed is not None:
             print("\nEvaluating on normalized scale (tab2graph approach)...")
-            metrics = self.evaluate(Y_test, preds_or_proba, metrics=eval_metrics)
+            metrics = self.evaluate(y_test_transformed, preds_or_proba, metrics=eval_metrics)
             print(f"Metrics (on normalized data): {metrics}")
 
         return preds_or_proba, metrics
