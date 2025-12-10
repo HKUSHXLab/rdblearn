@@ -4,11 +4,13 @@ import fastdfs
 from fastdfs.transform import RDBTransformWrapper, RDBTransformPipeline, HandleDummyTable, FeaturizeDatetime
 from fastdfs.api import compute_dfs_features
 from fastdfs.dfs import DFSConfig
-from typing import Optional, List, Tuple, Union, Set
+from typing import Optional, List, Tuple, Union, Set, Dict
 import pandas as pd
 import numpy as np
 import warnings
-from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import LabelEncoder, StandardScaler, QuantileTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
 from autogluon.features.generators import AutoMLPipelineFeatureGenerator
 from autogluon.core.data import LabelCleaner
 from autogluon.core.utils import infer_problem_type
@@ -37,11 +39,6 @@ def generate_features(
     if rdb is None:
         raise ValueError("rdb must be provided")
 
-    effective_config = DFSConfig()
-    if dfs_config:
-        for key, value in dfs_config.items():
-            if hasattr(effective_config, key):
-                setattr(effective_config, key, value)
     
     features = pipeline.compute_features(
         rdb=rdb,
@@ -210,3 +207,105 @@ def ag_transform(
     return X_train_transformed, y_train_transformed, X_test_transformed
 
 
+def convert_categoricals_to_numeric(
+    train_df: pd.DataFrame,
+    test_df: Optional[pd.DataFrame] = None
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Convert all categorical (object/category dtype) columns to numeric using label encoding.
+    
+    Args:
+        train_df: Training dataframe
+        test_df: Optional test dataframe
+        
+    Returns:
+        Tuple of (train_transformed, test_transformed)
+    """
+    train_transformed = train_df.copy()
+    test_transformed = test_df.copy() if test_df is not None else None
+    
+    # Identify categorical columns
+    cat_columns = train_df.select_dtypes(include=['object', 'category']).columns.tolist()
+    
+    for col in cat_columns:
+        le = LabelEncoder()
+        
+        # Fit on training data
+        train_transformed[col] = le.fit_transform(train_df[col].astype(str))
+        
+        # Transform test data, handling unseen categories
+        if test_transformed is not None:
+            # Get unique values in test that aren't in train
+            test_vals = test_df[col].astype(str)
+            unseen_mask = ~test_vals.isin(le.classes_)
+            
+            # Add unseen categories to the encoder
+            if unseen_mask.any():
+                le.classes_ = np.append(le.classes_, test_vals[unseen_mask].unique())
+            
+            test_transformed[col] = le.transform(test_vals)
+    
+    return train_transformed, test_transformed
+
+
+# def normalize_numeric_columns(
+#     train_df: pd.DataFrame,
+#     test_df: Optional[pd.DataFrame] = None,
+#     skew_threshold: float = 0.99,
+#     impute_strategy: str = "median"
+# ) -> Tuple[pd.DataFrame, Optional[pd.DataFrame], Dict[str, Pipeline]]:
+#     """
+#     Normalize all numeric columns following tab2graph's NormNumericTransform approach.
+#     Each column gets its own scaler based on skew distribution.
+    
+#     This follows the tab2graph pattern where:
+#     - Skew > threshold: Use QuantileTransformer (for skewed distributions)
+#     - Skew <= threshold: Use StandardScaler (for normal distributions)
+#     - All numeric columns (features + target) are normalized
+    
+#     Args:
+#         train_df: Training dataframe
+#         test_df: Optional test dataframe
+#         skew_threshold: Threshold for detecting skewed distributions (default: 0.99)
+#         impute_strategy: Strategy for imputing missing values (default: "median")
+        
+#     Returns:
+#         Tuple of (train_normalized, test_normalized, column_scalers)
+#         where column_scalers is a dict mapping column names to fitted Pipeline objects
+#     """
+#     train_normalized = train_df.copy()
+#     test_normalized = test_df.copy() if test_df is not None else None
+    
+#     # Identify all numeric columns
+#     numeric_columns = train_df.select_dtypes(include=[np.number]).columns.tolist()
+#     column_scalers = {}
+    
+#     for col in numeric_columns:
+#         col_data = train_df[col].to_numpy().reshape(-1, 1)
+#         skew_score = pd.Series(col_data.flatten()).skew()
+        
+#         # Use QuantileTransformer for highly skewed data, StandardScaler otherwise
+#         # This matches the NormNumericTransform logic from tab2graph
+#         if np.abs(skew_score) > skew_threshold:
+#             print(f"Column '{col}': Skew detected (skew={skew_score:.4f}). Using QuantileTransformer.")
+#             scaler = Pipeline(steps=[
+#                 ('imputer', SimpleImputer(strategy=impute_strategy)),
+#                 ('scaler', QuantileTransformer(output_distribution='normal'))
+#             ])
+#         else:
+#             print(f"Column '{col}': Normal distribution (skew={skew_score:.4f}). Using StandardScaler.")
+#             scaler = Pipeline(steps=[
+#                 ('imputer', SimpleImputer(strategy=impute_strategy)),
+#                 ('scaler', StandardScaler())
+#             ])
+        
+#         # Fit and transform training data
+#         train_normalized[col] = scaler.fit_transform(col_data).flatten()
+#         column_scalers[col] = scaler
+        
+#         # Transform test data with the same scaler
+#         if test_normalized is not None and col in test_df.columns:
+#             test_col_data = test_df[col].to_numpy().reshape(-1, 1)
+#             test_normalized[col] = scaler.transform(test_col_data).flatten()
+    
+#     return train_normalized, test_normalized, column_scalers

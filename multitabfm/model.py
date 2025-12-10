@@ -283,6 +283,17 @@ class CustomLimiX:
 class AutoGluon:
     """Wrapper around AutoGluon TabularPredictor with full model suite."""
     
+    # Mapping of common metric names to AutoGluon's expected names
+    METRIC_MAPPING = {
+        'auroc': 'roc_auc',
+        'auc': 'roc_auc',
+        'roc': 'roc_auc',
+        'mae': 'mean_absolute_error',
+        'mse': 'mean_squared_error',
+        'rmse': 'root_mean_squared_error',
+        'r2': 'r2',
+    }
+    
     def __init__(
         self,
         task_type: str = "classification",
@@ -301,7 +312,13 @@ class AutoGluon:
             raise ValueError("task_type must be 'classification' or 'regression'.")
         
         self.problem_type = "binary" if self.task_type == "classification" else "regression"
-        self.eval_metric = eval_metric
+        
+        # Map metric names to AutoGluon's expected format
+        if eval_metric and eval_metric.lower() in self.METRIC_MAPPING:
+            self.eval_metric = self.METRIC_MAPPING[eval_metric.lower()]
+            print(f"Mapped eval_metric '{eval_metric}' to AutoGluon's '{self.eval_metric}'")
+        else:
+            self.eval_metric = eval_metric
         self.time_limit = time_limit
         self.use_ensembling = use_ensembling
         self.use_feature_generator = use_feature_generator

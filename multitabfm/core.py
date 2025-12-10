@@ -10,7 +10,7 @@ from fastdfs.transform import RDBTransformWrapper, RDBTransformPipeline, HandleD
 from fastdfs.api import compute_dfs_features
 from fastdfs.dfs import DFSConfig
 
-from .feature_engineer import generate_features, prepare_feature_inputs, merge_original_and_dfs, ag_transform
+from .feature_engineer import generate_features, prepare_feature_inputs, merge_original_and_dfs, ag_transform, convert_categoricals_to_numeric
 from .model import CustomTabPFN
 from .evaluation import compute_metrics
 from .utils import load_dataset
@@ -30,7 +30,6 @@ class MultiTabFM:
             
         self.custom_model_class = self.model_config.pop('custom_model_class', None)
         self.model = None
-        self.target_scaler = None
 
     def _batch_predict_proba(self, X: pd.DataFrame, batch_size: int) -> pd.DataFrame:
         """Batch-wise probability prediction. Returns DataFrame."""
@@ -82,26 +81,6 @@ class MultiTabFM:
         
         # Initialize and fit the model
         self.model = model_class(**model_config)
-
-        # Target Normalization for Regression
-        if task_type == "regression" and self.model.__class__.__name__ != "AutoGluon":
-            y_train_np = labels.to_numpy().reshape(-1, 1)
-            skew_score = pd.Series(y_train_np.flatten()).skew()
-            if np.abs(skew_score) > 0.99:
-                 self.target_scaler = Pipeline(steps=[
-                    ('imputer', SimpleImputer(strategy="median")),
-                    ('scaler', QuantileTransformer(output_distribution='normal'))])
-            else:
-                self.target_scaler = Pipeline(steps=[
-                    ('imputer', SimpleImputer(strategy="median")),
-                    ('scaler', StandardScaler())])
-            
-            labels = pd.Series(
-                self.target_scaler.fit_transform(y_train_np).flatten(),
-                index=labels.index,
-                name=labels.name
-            )
-
         self.model.fit(X=features, y=labels)
 
     def predict_proba(self, test_features: pd.DataFrame) -> pd.DataFrame:
@@ -114,16 +93,7 @@ class MultiTabFM:
         """Predict target values using batch processing."""
         if self.model is None:
             raise RuntimeError("Model not trained. Call fit() first.")
-        preds = self._batch_predict(test_features, self.batch_size)
-        
-        if self.target_scaler is not None:
-            preds_np = preds.to_numpy().reshape(-1, 1)
-            # Only inverse transform using the scaler step, skipping the imputer
-            preds = pd.Series(
-                self.target_scaler.named_steps['scaler'].inverse_transform(preds_np).flatten(),
-                index=preds.index
-            )
-        return preds
+        return self._batch_predict(test_features, self.batch_size)
 
     def evaluate(self, labels: pd.Series, preds_or_proba: Union[pd.DataFrame, np.ndarray, pd.Series], metrics: Optional[List[str]] = None) -> dict:
         """Evaluate predictions against true labels for classification or regression."""
@@ -159,6 +129,15 @@ class MultiTabFM:
         task_type = metadata.get('task_type')
         metric = metadata.get('evaluation_metric')
         eval_metrics = [metric] if metric else None
+
+
+        # print("\nApplying tab2graph's normalize_numeric_columns to all numeric data...")
+        # train_data, test_data, self.column_scalers = normalize_numeric_columns(
+        #     train_data,
+        #     test_data,
+        #     skew_threshold=0.99,
+        #     impute_strategy="median"
+        # )
 
         # Prepare target dataframes
         X_train, Y_train = train_data.drop(columns=[target_column]), train_data[target_column]
@@ -212,28 +191,43 @@ class MultiTabFM:
             train_features = base_train
             test_features = base_test
         
+        # Convert categorical columns to numeric representationsm, to avoid ag_transform dropping high cardinality categoricals
+        train_features, test_features = convert_categoricals_to_numeric(
+            train_features, 
+            test_features
+        )
+        # Step 1: Apply ag_transform for feature engineering (datetime, categorical encoding, etc.)
         X_train_transformed, y_train_transformed, X_test_transformed = ag_transform(
-            train_features.reset_index(drop=True), 
-            Y_train.reset_index(drop=True), 
+            train_features.reset_index(drop=True),
+            Y_train.reset_index(drop=True),
             test_features.reset_index(drop=True)
         )
 
-        # save X_train_transformed
-        X_train_transformed.to_parquet('/root/yl_project/multitabfm/debug/X_train_transformed.pqt', index=False)
+        # Step 2: Combine features and target for normalization
         train_data = pd.concat([X_train_transformed, y_train_transformed], axis=1)
-        # 2. Train model
-        self.fit(train_data, label_column=target_column, task_type=task_type, eval_metric=eval_metrics[0] if eval_metrics else None)
+        test_data = pd.concat([X_test_transformed, Y_test.reset_index(drop=True)], axis=1)
+        # train_data.to_parquet('/root/autodl-tmp/4dbinfer/amazon-single/rating/train.pqt', index=False)
+        # test_data.to_parquet('/root/autodl-tmp/4dbinfer/amazon-single/rating/test.pqt', index=False)
+        
+        # Extract normalized features for prediction
+        X_test = test_data.drop(columns=[target_column])
+        Y_test = test_data[target_column]
+        
+        # 2. Train model (data already normalized)
+        self.fit(train_data, label_column=target_column, task_type=task_type,
+                eval_metric=eval_metrics[0] if eval_metrics else None)
 
-        # 3. Predict
+        # 3. Predict (predictions will be in normalized space)
         if task_type == "regression":
-            preds_or_proba = self.predict(X_test_transformed)
+            preds_or_proba = self.predict(X_test)
         else:
-            preds_or_proba = self.predict_proba(X_test_transformed)
+            preds_or_proba = self.predict_proba(X_test)
 
-        # 4. Evaluate if possible
+        # 4. Evaluate on normalized scale (following tab2graph's approach)
         metrics = None
         if eval_metrics and Y_test is not None:
-            labels = Y_test
-            metrics = self.evaluate(labels, preds_or_proba, metrics=eval_metrics)
+            print("\nEvaluating on normalized scale (tab2graph approach)...")
+            metrics = self.evaluate(Y_test, preds_or_proba, metrics=eval_metrics)
+            print(f"Metrics (on normalized data): {metrics}")
 
         return preds_or_proba, metrics
