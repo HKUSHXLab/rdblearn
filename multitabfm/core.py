@@ -1,13 +1,8 @@
 from typing import Optional, List, Tuple, Union
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import StandardScaler, QuantileTransformer
-from sklearn.impute import SimpleImputer
-from sklearn.pipeline import Pipeline
-
 import fastdfs
 from fastdfs.transform import RDBTransformWrapper, RDBTransformPipeline, HandleDummyTable, FeaturizeDatetime
-from fastdfs.api import compute_dfs_features
 from fastdfs.dfs import DFSConfig
 
 from .feature_engineer import generate_features, prepare_for_dfs, add_dfs_features, ag_transform, ag_label_transform
@@ -18,7 +13,7 @@ from .utils import load_dataset
 
 class MultiTabFM:
     
-    def __init__(self, dfs_config: Optional[dict] = None, model_config: Optional[dict] = None, batch_size: int = 5000):
+    def __init__(self, dfs_config: Optional[dict] = None, model_config: Optional[dict] = None, batch_size: int = 5000, max_samples: int = 10000):
         self.model_config = (model_config or {}).copy()
         self.dfs_config = dfs_config or {}
         
@@ -27,6 +22,10 @@ class MultiTabFM:
             self.batch_size = self.model_config.pop('batch_size')
         else:
             self.batch_size = batch_size
+        if "max_samples" in self.model_config:
+            self.max_samples = self.model_config.pop("max_samples")
+        else:
+            self.max_samples = max_samples
             
         self.custom_model_class = self.model_config.pop('custom_model_class', None)
         self.model = None
@@ -116,28 +115,17 @@ class MultiTabFM:
         train_data, test_data, metadata, rdb = load_dataset(rdb_data_path, task_data_path)
         
         # Sampling target_table if max_samples is set
-        max_samples = self.model_config.get('max_samples')
-        if max_samples is not None and len(train_data) > max_samples:
-            print(f"Sampling {max_samples} from {len(train_data)} samples for training before DFS...")
-            train_data = train_data.sample(n=max_samples, random_state=42).reset_index(drop=True)
+        if len(train_data) > self.max_samples:
+            print(f"Sampling {self.max_samples} from {len(train_data)} samples for training before DFS...")
+            train_data = train_data.sample(n=self.max_samples, random_state=42).reset_index(drop=True)
 
         # Parse metadata
         key_mappings = {k: v for d in metadata['key_mappings'] for k, v in d.items()}
         time_column = metadata['time_column']
         target_column = metadata['target_column']
-        # Prioritize task_type from metadata, fallback to model_config
         task_type = metadata.get('task_type')
         metric = metadata.get('evaluation_metric')
         eval_metrics = [metric] if metric else None
-
-
-        # print("\nApplying tab2graph's normalize_numeric_columns to all numeric data...")
-        # train_data, test_data, self.column_scalers = normalize_numeric_columns(
-        #     train_data,
-        #     test_data,
-        #     skew_threshold=0.99,
-        #     impute_strategy="median"
-        # )
 
         # Prepare target dataframes
         X_train, Y_train = train_data.drop(columns=[target_column]), train_data[target_column]
@@ -163,8 +151,8 @@ class MultiTabFM:
             train_for_dfs, test_for_dfs = prepare_for_dfs(X_train, X_test, key_mappings, time_column)
             
             # Generate DFS features
-            train_dfs = generate_features(train_for_dfs, rdb, key_mappings, time_column, pipeline, self.dfs_config)
-            test_dfs = generate_features(test_for_dfs, rdb, key_mappings, time_column, pipeline, self.dfs_config)
+            train_dfs = generate_features(train_for_dfs, rdb, key_mappings, time_column, pipeline)
+            test_dfs = generate_features(test_for_dfs, rdb, key_mappings, time_column, pipeline)
             
             # Add DFS features to original data
             train_features = add_dfs_features(X_train, train_dfs)
@@ -187,14 +175,7 @@ class MultiTabFM:
 
         # Step 3: Combine features and target
         train_data = pd.concat([X_train_transformed, y_train_transformed], axis=1)
-        # test_data = pd.concat([X_test_transformed, y_test_transformed], axis=1)
-        # # train_data.to_parquet('/root/autodl-tmp/4dbinfer/amazon-single/rating/train.pqt', index=False)
-        # # test_data.to_parquet('/root/autodl-tmp/4dbinfer/amazon-single/rating/test.pqt', index=False)
-        
-        # # Extract normalized features for prediction
-        # X_test = test_data.drop(columns=[target_column])
-        # Y_test = test_data[target_column]
-        
+
         # 2. Train model (data already normalized)
         self.fit(train_data, label_column=target_column, task_type=task_type,
                 eval_metric=eval_metrics[0] if eval_metrics else None)

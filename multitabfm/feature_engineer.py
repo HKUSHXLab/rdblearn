@@ -1,13 +1,9 @@
-from typing import Optional, Union
-import pandas as pd
-import fastdfs
-from fastdfs.transform import RDBTransformWrapper, RDBTransformPipeline, HandleDummyTable, FeaturizeDatetime
-from fastdfs.api import compute_dfs_features
-from fastdfs.dfs import DFSConfig
 from typing import Optional, List, Tuple, Union, Set, Dict
 import pandas as pd
 import numpy as np
 import warnings
+import fastdfs
+
 from sklearn.preprocessing import LabelEncoder, StandardScaler, QuantileTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
@@ -22,7 +18,6 @@ def generate_features(
     key_mappings: dict,
     time_column: str,
     pipeline: fastdfs.DFSPipeline,
-    dfs_config: Optional[Union[dict, DFSConfig]] = None,
 ) -> pd.DataFrame:
     """Generate DFS features using fastdfs.api.compute_dfs_features.
     
@@ -31,7 +26,6 @@ def generate_features(
         rdb: Loaded RDB object from fastdfs
         key_mappings: Dict mapping local columns to RDB table.column (e.g., {'user_id': 'users.user_id'})
         time_column: Name of the time/cutoff column
-        dfs_config: Optional DFS configuration overrides
     
     Returns:
         Feature-augmented dataframe
@@ -159,14 +153,19 @@ def add_dfs_features(
 
 def ag_label_transform(
     y_train: pd.Series,
-    y_test: Optional[pd.Series] = None
-) -> Tuple[pd.Series, Optional[pd.Series]]:
+    y_test: Optional[pd.Series] = None,
+    skew_threshold: float = 0.99,
+    impute_strategy: str = "median"
+) -> Tuple[pd.Series, Optional[pd.Series], Optional[Pipeline]]:
     """
-    Transform labels using AutoGluon's LabelCleaner.
+    Transform labels using AutoGluon's LabelCleaner for non-regression tasks.
+    For regression problems, only normalize the labels using the normalize_numeric_columns logic.
     
     Args:
         y_train: Training labels series
         y_test: Optional test labels series
+        skew_threshold: Threshold for detecting skewed distributions (default: 0.99)
+        impute_strategy: Strategy for imputing missing values (default: "median")
         
     Returns:
         Tuple of (y_train_transformed, y_test_transformed)
@@ -174,16 +173,48 @@ def ag_label_transform(
     # Infer problem type
     problem_type = infer_problem_type(y_train)
     
-    # Setup label cleaner
-    label_cleaner = LabelCleaner.construct(problem_type=problem_type, y=y_train)
+    label_scaler = None
     
-    # Transform training labels
-    y_train_transformed = label_cleaner.transform(y_train)
-    
-    # Transform test labels if provided
-    y_test_transformed = None
-    if y_test is not None:
-        y_test_transformed = label_cleaner.transform(y_test)
+    if problem_type == 'regression':
+        # For regression, skip LabelCleaner and only apply normalization
+        y_train_data = y_train.to_numpy().reshape(-1, 1)
+        skew_score = pd.Series(y_train_data.flatten()).skew()
+        
+        # Use QuantileTransformer for highly skewed data, StandardScaler otherwise
+        if np.abs(skew_score) > skew_threshold:
+            print(f"Label: Skew detected (skew={skew_score:.4f}). Using QuantileTransformer.")
+            label_scaler = Pipeline(steps=[
+                ('imputer', SimpleImputer(strategy=impute_strategy)),
+                ('scaler', QuantileTransformer(output_distribution='normal'))
+            ])
+        else:
+            print(f"Label: Normal distribution (skew={skew_score:.4f}). Using StandardScaler.")
+            label_scaler = Pipeline(steps=[
+                ('imputer', SimpleImputer(strategy=impute_strategy)),
+                ('scaler', StandardScaler())
+            ])
+        
+        # Fit and transform training labels
+        y_train_normalized = label_scaler.fit_transform(y_train_data).flatten()
+        y_train_transformed = pd.Series(y_train_normalized, index=y_train.index)
+        
+        # Transform test labels with the same scaler
+        y_test_transformed = None
+        if y_test is not None:
+            y_test_data = y_test.to_numpy().reshape(-1, 1)
+            y_test_normalized = label_scaler.transform(y_test_data).flatten()
+            y_test_transformed = pd.Series(y_test_normalized, index=y_test.index)
+    else:
+        # For non-regression tasks, use LabelCleaner
+        label_cleaner = LabelCleaner.construct(problem_type=problem_type, y=y_train)
+        
+        # Transform training labels
+        y_train_transformed = label_cleaner.transform(y_train)
+        
+        # Transform test labels if provided
+        y_test_transformed = None
+        if y_test is not None:
+            y_test_transformed = label_cleaner.transform(y_test)
     
     return y_train_transformed, y_test_transformed
 
@@ -233,7 +264,7 @@ def ag_transform(
 def convert_categoricals_to_numeric(
     train_df: pd.DataFrame,
     test_df: Optional[pd.DataFrame] = None
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
     """
     Convert all categorical (object/category dtype) columns to numeric using label encoding.
     
@@ -271,64 +302,3 @@ def convert_categoricals_to_numeric(
     return train_transformed, test_transformed
 
 
-# def normalize_numeric_columns(
-#     train_df: pd.DataFrame,
-#     test_df: Optional[pd.DataFrame] = None,
-#     skew_threshold: float = 0.99,
-#     impute_strategy: str = "median"
-# ) -> Tuple[pd.DataFrame, Optional[pd.DataFrame], Dict[str, Pipeline]]:
-#     """
-#     Normalize all numeric columns following tab2graph's NormNumericTransform approach.
-#     Each column gets its own scaler based on skew distribution.
-    
-#     This follows the tab2graph pattern where:
-#     - Skew > threshold: Use QuantileTransformer (for skewed distributions)
-#     - Skew <= threshold: Use StandardScaler (for normal distributions)
-#     - All numeric columns (features + target) are normalized
-    
-#     Args:
-#         train_df: Training dataframe
-#         test_df: Optional test dataframe
-#         skew_threshold: Threshold for detecting skewed distributions (default: 0.99)
-#         impute_strategy: Strategy for imputing missing values (default: "median")
-        
-#     Returns:
-#         Tuple of (train_normalized, test_normalized, column_scalers)
-#         where column_scalers is a dict mapping column names to fitted Pipeline objects
-#     """
-#     train_normalized = train_df.copy()
-#     test_normalized = test_df.copy() if test_df is not None else None
-    
-#     # Identify all numeric columns
-#     numeric_columns = train_df.select_dtypes(include=[np.number]).columns.tolist()
-#     column_scalers = {}
-    
-#     for col in numeric_columns:
-#         col_data = train_df[col].to_numpy().reshape(-1, 1)
-#         skew_score = pd.Series(col_data.flatten()).skew()
-        
-#         # Use QuantileTransformer for highly skewed data, StandardScaler otherwise
-#         # This matches the NormNumericTransform logic from tab2graph
-#         if np.abs(skew_score) > skew_threshold:
-#             print(f"Column '{col}': Skew detected (skew={skew_score:.4f}). Using QuantileTransformer.")
-#             scaler = Pipeline(steps=[
-#                 ('imputer', SimpleImputer(strategy=impute_strategy)),
-#                 ('scaler', QuantileTransformer(output_distribution='normal'))
-#             ])
-#         else:
-#             print(f"Column '{col}': Normal distribution (skew={skew_score:.4f}). Using StandardScaler.")
-#             scaler = Pipeline(steps=[
-#                 ('imputer', SimpleImputer(strategy=impute_strategy)),
-#                 ('scaler', StandardScaler())
-#             ])
-        
-#         # Fit and transform training data
-#         train_normalized[col] = scaler.fit_transform(col_data).flatten()
-#         column_scalers[col] = scaler
-        
-#         # Transform test data with the same scaler
-#         if test_normalized is not None and col in test_df.columns:
-#             test_col_data = test_df[col].to_numpy().reshape(-1, 1)
-#             test_normalized[col] = scaler.transform(test_col_data).flatten()
-    
-#     return train_normalized, test_normalized, column_scalers

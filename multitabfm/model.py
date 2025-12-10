@@ -6,9 +6,8 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import TensorDataset, DataLoader
 from tabpfn import TabPFNClassifier, TabPFNRegressor
-from autogluon.tabular import TabularDataset, TabularPredictor
+from autogluon.tabular import TabularPredictor
 
 
 LIMIX_ROOT = Path("/root/yl_project/LimiX")
@@ -34,7 +33,6 @@ class CustomTabPFN:
         self,
         model_path: str = None,
         task_type: str = "regression",
-        max_samples: int = None,
         n_estimators: int = 8,
         device: str = "cuda",
         n_preprocessing_jobs: int = -1,
@@ -45,7 +43,6 @@ class CustomTabPFN:
              raise ValueError("CustomTabPFN requires a model_path pointing to the TabPFN directory.")
         self.model_path = model_path
         self.task_type = task_type
-        self.max_samples = max_samples  # Maximum samples per estimator (handled by TabPFN internally)
         self.n_estimators = n_estimators
         self.device = device
         self.n_preprocessing_jobs = n_preprocessing_jobs
@@ -53,17 +50,8 @@ class CustomTabPFN:
         self.model = None
 
     def fit(self, X: pd.DataFrame, y: pd.Series, **kwargs):
-        """Fit the TabPFN model using its built-in subsample mechanism.
-        
-        Each of the n_estimators will independently subsample max_samples from the data,
-        providing ensemble diversity without manual preprocessing.
+        """Fit the TabPFN model.
         """
-        # Configure inference_config for TabPFN's internal subsampling
-        inference_config = {}
-        if self.max_samples is not None:
-            # Let TabPFN handle subsampling internally for each estimator
-            inference_config['SUBSAMPLE_SAMPLES'] = self.max_samples
-            print(f"TabPFN will subsample {self.max_samples} samples per estimator from {len(X)} total samples")
         
         # Choose the appropriate TabPFN model based on task type
         if self.task_type == "regression":
@@ -71,7 +59,6 @@ class CustomTabPFN:
                 model_path=self.model_path,
                 n_estimators=self.n_estimators,
                 ignore_pretraining_limits=True,  # Allow datasets larger than 10K samples
-                inference_config=inference_config if inference_config else None,
                 device=self.device,
                 n_preprocessing_jobs=self.n_preprocessing_jobs
             )
@@ -80,7 +67,6 @@ class CustomTabPFN:
                 model_path=self.model_path,
                 n_estimators=self.n_estimators,
                 ignore_pretraining_limits=True,  # Allow datasets larger than 10K samples
-                inference_config=inference_config if inference_config else None,
                 device=self.device,
                 n_preprocessing_jobs=self.n_preprocessing_jobs
             )
@@ -146,7 +132,6 @@ class CustomLimiX:
         inference_config: Optional[Union[str, Path]] = None,
         normalize_target: bool = True,
         device: Optional[Union[str, torch.device]] = None,
-        max_samples: Optional[int] = None,
         **predictor_kwargs,
     ) -> None:
         task_type = task_type.lower()
@@ -170,7 +155,6 @@ class CustomLimiX:
         self.device = device
         self.limix_root = Path(limix_root)
         self.model_path = self._resolve_model_path(model_path)
-        self.max_samples = max_samples
 
         if inference_config is None:
             # config_name = "config/cls_default_16M_retrieval.json" if task_type == "classification" else "config/reg_default_16M_retrieval.json"
