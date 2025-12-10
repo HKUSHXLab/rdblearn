@@ -115,6 +115,8 @@ class MultiTabFM:
         train_data, test_data, metadata, rdb = load_dataset(rdb_data_path, task_data_path)
         
         # Sampling target_table if max_samples is set
+        # NOTE: without this subsampling, DFS on training set will be slow and TabPFN will also be slow
+        # even if we turn on subsampling in TabPFN itself.
         if len(train_data) > self.max_samples:
             print(f"Sampling {self.max_samples} from {len(train_data)} samples for training before DFS...")
             train_data = train_data.sample(n=self.max_samples, random_state=42).reset_index(drop=True)
@@ -168,6 +170,8 @@ class MultiTabFM:
         )
         
         # Step 2: Apply label transformation to both train and test labels
+        # TODO: Right now this includes label normalization for 4DBInfer.  Need to add a toggle to
+        # disable normalization for RelBench.
         y_train_transformed, y_test_transformed = ag_label_transform(
             Y_train.reset_index(drop=True),
             Y_test.reset_index(drop=True)
