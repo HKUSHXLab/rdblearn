@@ -2,7 +2,7 @@ from typing import Optional, List, Tuple, Union
 import pandas as pd
 import numpy as np
 import fastdfs
-from fastdfs.transform import RDBTransformWrapper, RDBTransformPipeline, HandleDummyTable, FeaturizeDatetime
+from fastdfs.transform import RDBTransformWrapper, RDBTransformPipeline, HandleDummyTable, FeaturizeDatetime, FillMissingPrimaryKey
 from fastdfs.dfs import DFSConfig
 
 from .feature_engineer import generate_features, prepare_for_dfs, add_dfs_features, ag_transform, ag_label_transform
@@ -145,6 +145,7 @@ class MultiTabFM:
             pipeline = fastdfs.DFSPipeline(
                 transform_pipeline=RDBTransformPipeline([
                     HandleDummyTable(),
+                    FillMissingPrimaryKey(),
                     RDBTransformWrapper(FeaturizeDatetime(features=["year", "month", "day", "hour", "dayofweek"])),
                 ]),
                 dfs_config=effective_config
@@ -163,18 +164,18 @@ class MultiTabFM:
             train_features = X_train
             test_features = X_test
         
-        # Step 1: Apply ag_transform for feature engineering (categorical conversion, datetime, etc.)
+        # Apply ag_transform for feature engineering (categorical conversion, datetime, etc.)
         X_train_transformed, X_test_transformed = ag_transform(
             train_features.reset_index(drop=True),
             test_features.reset_index(drop=True)
         )
         
-        # Step 2: Apply label transformation to both train and test labels
-        # TODO: Right now this includes label normalization for 4DBInfer.  Need to add a toggle to
-        # disable normalization for RelBench.
+        # Apply label transformation to both train and test labels
+        # Right now if "normalization_regression=True", this includes label normalization for 4DBInfer. Need to disable normalization for RelBench.
         y_train_transformed, y_test_transformed = ag_label_transform(
             Y_train.reset_index(drop=True),
-            Y_test.reset_index(drop=True)
+            Y_test.reset_index(drop=True),
+            normalize_regression = True,
         )
 
         # Step 3: Combine features and target

@@ -154,16 +154,18 @@ def add_dfs_features(
 def ag_label_transform(
     y_train: pd.Series,
     y_test: Optional[pd.Series] = None,
+    normalize_regression: bool = True,
     skew_threshold: float = 0.99,
     impute_strategy: str = "median"
-) -> Tuple[pd.Series, Optional[pd.Series], Optional[Pipeline]]:
+) -> Tuple[pd.Series, Optional[pd.Series]]:
     """
     Transform labels using AutoGluon's LabelCleaner for non-regression tasks.
-    For regression problems, only normalize the labels using the normalize_numeric_columns logic.
+    For regression problems, optionally normalize the labels using the normalize_numeric_columns logic.
     
     Args:
         y_train: Training labels series
         y_test: Optional test labels series
+        normalize_regression: Whether to normalize regression labels (default: True for 4DBInfer, set False for RelBench)
         skew_threshold: Threshold for detecting skewed distributions (default: 0.99)
         impute_strategy: Strategy for imputing missing values (default: "median")
         
@@ -173,39 +175,37 @@ def ag_label_transform(
     # Infer problem type
     problem_type = infer_problem_type(y_train)
     
-    label_scaler = None
-    
-    if problem_type == 'regression':
-        # For regression, skip LabelCleaner and only apply normalization
+    if problem_type == 'regression' and normalize_regression:
+        # For regression with normalization enabled, skip LabelCleaner and apply normalization
         y_train_data = y_train.to_numpy().reshape(-1, 1)
         skew_score = pd.Series(y_train_data.flatten()).skew()
         
         # Use QuantileTransformer for highly skewed data, StandardScaler otherwise
         if np.abs(skew_score) > skew_threshold:
             print(f"Label: Skew detected (skew={skew_score:.4f}). Using QuantileTransformer.")
-            label_scaler = Pipeline(steps=[
+            scaler = Pipeline(steps=[
                 ('imputer', SimpleImputer(strategy=impute_strategy)),
                 ('scaler', QuantileTransformer(output_distribution='normal'))
             ])
         else:
             print(f"Label: Normal distribution (skew={skew_score:.4f}). Using StandardScaler.")
-            label_scaler = Pipeline(steps=[
+            scaler = Pipeline(steps=[
                 ('imputer', SimpleImputer(strategy=impute_strategy)),
                 ('scaler', StandardScaler())
             ])
         
         # Fit and transform training labels
-        y_train_normalized = label_scaler.fit_transform(y_train_data).flatten()
+        y_train_normalized = scaler.fit_transform(y_train_data).flatten()
         y_train_transformed = pd.Series(y_train_normalized, index=y_train.index)
         
         # Transform test labels with the same scaler
         y_test_transformed = None
         if y_test is not None:
             y_test_data = y_test.to_numpy().reshape(-1, 1)
-            y_test_normalized = label_scaler.transform(y_test_data).flatten()
+            y_test_normalized = scaler.transform(y_test_data).flatten()
             y_test_transformed = pd.Series(y_test_normalized, index=y_test.index)
     else:
-        # For non-regression tasks, use LabelCleaner
+        # For non-regression tasks or regression without normalization, use LabelCleaner
         label_cleaner = LabelCleaner.construct(problem_type=problem_type, y=y_train)
         
         # Transform training labels
