@@ -24,16 +24,16 @@ import traceback
 # Add the multitabfm package to the path
 import sys
 sys.path.append('/root/yl_project/multitabfm')
-
 from multitabfm.api import train_and_predict
-from multitabfm.model import CustomLimiX, CustomTabPFN
+from multitabfm.model import CustomLimiX, CustomTabPFN, AutoGluon
 
 
-# SMALL_DATASET_NAMES = {"rel-amazon-post-dfs-3", "rel-avito-post-dfs-3", "rel-stack-post-dfs-3","rel-hm-post-dfs-3"}
+SMALL_DATASET_NAMES = {"rel-amazon", "rel-avito", "rel-stack","rel-hm","rel-event","rel-f1","rel-trial"}
 # SMALL_DATASET_NAMES = {"rel-stack-post-dfs-3"}
-SMALL_DATASET_NAMES = {"amazon", "diginetica", "retailrocket", "outbrain-small", "stackexchange"}
+# SMALL_DATASET_NAMES = {"amazon","retailrocket", "outbrain-small", "stackexchange"}
+# SMALL_DATASET_NAMES = {"retailrocket", "stackexchange"}
 # SMALL_DATASET_NAMES = {"rel-trial-post-dfs-3", "rel-event-post-dfs-3", "rel-f1-post-dfs-3"}
-# SMALL_DATASET_NAMES = {"rel-trial"}
+# SMALL_DATASET_NAMES = {"stackexchange2"}
 def _find_tasks_by_type(base_path: str, target_task_type: str) -> List[Tuple[str, str]]:
     """Shared helper to discover tasks that match the requested task type."""
     target_task_type = target_task_type.lower()
@@ -80,12 +80,12 @@ def _find_tasks_by_type(base_path: str, target_task_type: str) -> List[Tuple[str
     return tasks
 
 
-def find_regression_tasks(base_path: str = "/root/autodl-tmp/4dbinfer") -> List[Tuple[str, str]]:
+def find_regression_tasks(base_path: str = "/root/autodl-tmp/tabpfn_data") -> List[Tuple[str, str]]:
     """Discover all regression tasks underneath the TabPFN data root."""
     return _find_tasks_by_type(base_path, "regression")
 
 
-def find_classification_tasks(base_path: str = "/root/autodl-tmp/4dbinfer") -> List[Tuple[str, str]]:
+def find_classification_tasks(base_path: str = "/root/autodl-tmp/tabpfn_data") -> List[Tuple[str, str]]:
     """Discover all classification tasks underneath the TabPFN data root."""
     return _find_tasks_by_type(base_path, "classification")
 
@@ -134,7 +134,7 @@ def run_experiment(task_type: str,
     print(f"Task path: {task_data_path}")
     print(f"{'='*60}")
     
-    start_time = datetime.now()
+    overall_start_time = datetime.now()
     
     try:
         # Build configs without mutating the shared experiment_config
@@ -143,15 +143,15 @@ def run_experiment(task_type: str,
         model_config.setdefault('task_type', task_type)
 
         # Run the experiment using the CustomLimiX flow
-        preds, metrics = train_and_predict(
+        preds, metrics, timing_info = train_and_predict(
             rdb_data_path=rdb_data_path,
             task_data_path=task_data_path,
-            dfs_config=dfs_config,
+            # dfs_config=dfs_config,
             model_config=model_config,
         )
         
-        end_time = datetime.now()
-        duration = (end_time - start_time).total_seconds()
+        overall_end_time = datetime.now()
+        overall_duration = (overall_end_time - overall_start_time).total_seconds()
         
         # Prepare results
         result = {
@@ -162,9 +162,12 @@ def run_experiment(task_type: str,
             'rdb_data_path': rdb_data_path,
             'task_data_path': task_data_path,
             'status': 'success',
-            'start_time': start_time.isoformat(),
-            'end_time': end_time.isoformat(),
-            'duration_seconds': duration,
+            'start_time': overall_start_time.isoformat(),
+            'end_time': overall_end_time.isoformat(),
+            'overall_duration_seconds': overall_duration,
+            'fit_seconds': timing_info['fit_seconds'],
+            'predict_seconds': timing_info['predict_seconds'],
+            'fit_predict_total_seconds': timing_info['total_fit_predict_seconds'],
             'metrics': metrics,
             'num_predictions': len(preds) if preds is not None else 0,
             'config': experiment_config,
@@ -172,7 +175,10 @@ def run_experiment(task_type: str,
         }
         
         print(f"✓ Experiment completed successfully!")
-        print(f"  Duration: {duration:.2f} seconds")
+        print(f"  Overall duration: {overall_duration:.2f} seconds")
+        print(f"  Fit duration: {timing_info['fit_seconds']:.2f} seconds")
+        print(f"  Predict duration: {timing_info['predict_seconds']:.2f} seconds")
+        print(f"  Fit+Predict total: {timing_info['total_fit_predict_seconds']:.2f} seconds")
         print(f"  Predictions: {result['num_predictions']}")
         if metrics:
             print(f"  Metrics: {metrics}")
@@ -180,14 +186,14 @@ def run_experiment(task_type: str,
         return result
         
     except Exception as e:
-        end_time = datetime.now()
-        duration = (end_time - start_time).total_seconds()
+        overall_end_time = datetime.now()
+        overall_duration = (overall_end_time - overall_start_time).total_seconds()
         
         error_msg = str(e)
         error_traceback = traceback.format_exc()
         
         print(f"✗ Experiment failed!")
-        print(f"  Duration: {duration:.2f} seconds")
+        print(f"  Overall duration: {overall_duration:.2f} seconds")
         print(f"  Error: {error_msg}")
         
         result = {
@@ -198,9 +204,12 @@ def run_experiment(task_type: str,
             'rdb_data_path': rdb_data_path,
             'task_data_path': task_data_path,
             'status': 'failed',
-            'start_time': start_time.isoformat(),
-            'end_time': end_time.isoformat(),
-            'duration_seconds': duration,
+            'start_time': overall_start_time.isoformat(),
+            'end_time': overall_end_time.isoformat(),
+            'overall_duration_seconds': overall_duration,
+            'fit_seconds': None,
+            'predict_seconds': None,
+            'fit_predict_total_seconds': None,
             'metrics': None,
             'num_predictions': 0,
             'config': experiment_config,
@@ -232,7 +241,10 @@ def save_results(results: List[Dict], output_dir: str = "experiment_results"):
             'task_type': result.get('task_type', ''),
             'dataset_size': result.get('dataset_size', ''),
             'status': result['status'],
-            'duration_seconds': result['duration_seconds'],
+            'overall_duration_seconds': result['overall_duration_seconds'],
+            'fit_seconds': result.get('fit_seconds'),
+            'predict_seconds': result.get('predict_seconds'),
+            'fit_predict_total_seconds': result.get('fit_predict_total_seconds'),
             'num_predictions': result['num_predictions'],
         }
         
@@ -299,7 +311,9 @@ def main():
         print("No tasks found for the configured task types and dataset size filter!")
         return
 
-    print(f"\n🎯 Will run {len(tasks_to_run)} experiments for task types: {', '.join(task_types_to_run)}")
+    print(f"\n🎯 Will run {len(tasks_to_run)} experiments for task types: {', '.join(task_types_to_run)}. The tasks are")
+    for task_type, dataset_size, rdb, task in tasks_to_run:
+        print(f"  - [{task_type}/{dataset_size}] {Path(rdb).name} / {task}")
     if dataset_size_filter != 'all':
         print(f"  Dataset size filter: {dataset_size_filter}")
 
@@ -311,7 +325,8 @@ def main():
     # Map model_name to class
     model_map = {
         "tabpfn": CustomTabPFN,
-        "limix": CustomLimiX
+        "limix": CustomLimiX,
+        "ag": AutoGluon,
     }
 
     for i, (task_type, dataset_size, rdb_data_path, task_data_path) in enumerate(tasks_to_run, 1):
@@ -323,11 +338,11 @@ def main():
         # Select appropriate model config based on task type
         if task_type == "regression":
             model_config_path = "/root/yl_project/multitabfm/config/model/tabpfn_v2_regression_default.json"
-            # model_config_path = "/root/yl_project/multitabfm/config/model/limix_default.json" # Assuming regression uses LimiX default for now, adjust if needed
+            # model_config_path = "/root/yl_project/multitabfm/config/model/ag_default.json" # Assuming regression uses LimiX default for now, adjust if needed
         else:
             model_config_path = "/root/yl_project/multitabfm/config/model/tabpfn_v2_classification_default.json" # Or a classification specific one
-            # model_config_path = "/root/yl_project/multitabfm/config/model/limix_default.json"
-
+            # model_config_path = "/root/yl_project/multitabfm/config/model/ag_default.json"
+        # model_config_path = "/root/yl_project/multitabfm/config/model/ag_default.json"
         model_config = load_config(model_config_path)
         
         # Override task_type in model_config

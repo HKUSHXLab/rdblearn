@@ -2,7 +2,8 @@ from typing import Optional, List, Tuple, Union
 import pandas as pd
 import numpy as np
 import fastdfs
-from fastdfs.transform import RDBTransformWrapper, RDBTransformPipeline, HandleDummyTable, FeaturizeDatetime, FillMissingPrimaryKey
+from datetime import datetime
+from fastdfs.transform import RDBTransformWrapper, RDBTransformPipeline, HandleDummyTable, FeaturizeDatetime, FillMissingPrimaryKey, ResolveSelfLoops
 from fastdfs.dfs import DFSConfig
 
 from .feature_engineer import generate_features, prepare_for_dfs, add_dfs_features, ag_transform, ag_label_transform
@@ -100,7 +101,7 @@ class MultiTabFM:
 
     def train_and_predict(self,
                          rdb_data_path: str,
-                         task_data_path: str) -> Tuple[Union[pd.DataFrame, np.ndarray, pd.Series], Optional[dict]]:
+                         task_data_path: str) -> Tuple[Union[pd.DataFrame, np.ndarray, pd.Series], Optional[dict], dict]:
         """Main API: End-to-end training and prediction from data paths.
         
         Args:
@@ -108,7 +109,10 @@ class MultiTabFM:
             task_data_path: Path to task data directory (e.g., "data/rel-event/user-ignore")
             
         Returns:
-            Tuple of (predictions, metrics)
+            Tuple of (predictions, metrics, timing_info)
+            - predictions: Model predictions
+            - metrics: Evaluation metrics (if available)
+            - timing_info: Dict with 'fit_seconds' and 'predict_seconds'
         """
         
         # Load dataset
@@ -146,6 +150,7 @@ class MultiTabFM:
                 transform_pipeline=RDBTransformPipeline([
                     HandleDummyTable(),
                     FillMissingPrimaryKey(),
+                    ResolveSelfLoops(),
                     RDBTransformWrapper(FeaturizeDatetime(features=["year", "month", "day", "hour", "dayofweek"])),
                 ]),
                 dfs_config=effective_config
@@ -172,24 +177,44 @@ class MultiTabFM:
         
         # Apply label transformation to both train and test labels
         # Right now if "normalization_regression=True", this includes label normalization for 4DBInfer. Need to disable normalization for RelBench.
+        print(f"Y_test NaNs before transform: {Y_test.isna().sum()}")
+        
+        # If task_type is explicitly regression, pass it to override auto-inference
+        # which might incorrectly infer multiclass for integer regression targets
+        ag_problem_type = "regression" if task_type == "regression" else None
+        
         y_train_transformed, y_test_transformed = ag_label_transform(
             Y_train.reset_index(drop=True),
             Y_test.reset_index(drop=True),
-            normalize_regression = True,
+            normalize_regression = False,
+            problem_type=ag_problem_type
         )
+        print(f"y_test_transformed NaNs after transform: {y_test_transformed.isna().sum()}")
 
         # Step 3: Combine features and target
         train_data = pd.concat([X_train_transformed, y_train_transformed], axis=1)
 
-        # 2. Train model (data already normalized)
+        # 2. Train model (data already normalized) - TIMED
+        fit_start = datetime.now()
         self.fit(train_data, label_column=target_column, task_type=task_type,
                 eval_metric=eval_metrics[0] if eval_metrics else None)
+        fit_end = datetime.now()
+        fit_seconds = (fit_end - fit_start).total_seconds()
 
-        # 3. Predict (predictions will be in normalized space)
+        # 3. Predict (predictions will be in normalized space) - TIMED
+        predict_start = datetime.now()
         if task_type == "regression":
             preds_or_proba = self.predict(X_test_transformed)
         else:
             preds_or_proba = self.predict_proba(X_test_transformed)
+        
+        if isinstance(preds_or_proba, pd.DataFrame):
+             print(f"preds_or_proba NaNs: {preds_or_proba.isna().sum().sum()}")
+        else:
+             print(f"preds_or_proba NaNs: {pd.Series(preds_or_proba).isna().sum()}")
+
+        predict_end = datetime.now()
+        predict_seconds = (predict_end - predict_start).total_seconds()
 
         # 4. Evaluate on normalized scale (following tab2graph's approach)
         metrics = None
@@ -198,4 +223,13 @@ class MultiTabFM:
             metrics = self.evaluate(y_test_transformed, preds_or_proba, metrics=eval_metrics)
             print(f"Metrics (on normalized data): {metrics}")
 
-        return preds_or_proba, metrics
+        # Prepare timing information
+        timing_info = {
+            'fit_seconds': fit_seconds,
+            'predict_seconds': predict_seconds,
+            'total_fit_predict_seconds': fit_seconds + predict_seconds
+        }
+        
+        print(f"\nTiming: fit={fit_seconds:.2f}s, predict={predict_seconds:.2f}s, total={timing_info['total_fit_predict_seconds']:.2f}s")
+
+        return preds_or_proba, metrics, timing_info
