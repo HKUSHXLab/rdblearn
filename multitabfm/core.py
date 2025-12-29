@@ -5,18 +5,21 @@ import fastdfs
 from datetime import datetime
 from fastdfs.transform import RDBTransformWrapper, RDBTransformPipeline, HandleDummyTable, FeaturizeDatetime, FillMissingPrimaryKey, ResolveSelfLoops
 from fastdfs.dfs import DFSConfig
+import logging
 
 from .feature_engineer import generate_features, prepare_for_dfs, add_dfs_features, ag_transform, ag_label_transform
 from .model import CustomTabPFN
 from .evaluation import compute_metrics
 from .utils import load_dataset
 
+logger = logging.getLogger(__name__)
 
 class MultiTabFM:
     
-    def __init__(self, dfs_config: Optional[dict] = None, model_config: Optional[dict] = None, batch_size: int = 5000, max_samples: int = 10000):
+    def __init__(self, dfs_config: Optional[dict] = None, model_config: Optional[dict] = None, batch_size: int = 5000, max_samples: int = 10000, stratified_sampling: bool = False):
         self.model_config = (model_config or {}).copy()
         self.dfs_config = dfs_config or {}
+        self.stratified_sampling = stratified_sampling
         
         # Extract batch_size from model_config if present, otherwise use argument
         if 'batch_size' in self.model_config:
@@ -117,14 +120,8 @@ class MultiTabFM:
         
         # Load dataset
         train_data, test_data, metadata, rdb = load_dataset(rdb_data_path, task_data_path)
+        load_dataset_end = datetime.now()
         
-        # Sampling target_table if max_samples is set
-        # NOTE: without this subsampling, DFS on training set will be slow and TabPFN will also be slow
-        # even if we turn on subsampling in TabPFN itself.
-        if len(train_data) > self.max_samples:
-            print(f"Sampling {self.max_samples} from {len(train_data)} samples for training before DFS...")
-            train_data = train_data.sample(n=self.max_samples, random_state=42).reset_index(drop=True)
-
         # Parse metadata
         key_mappings = {k: v for d in metadata['key_mappings'] for k, v in d.items()}
         time_column = metadata['time_column']
@@ -132,6 +129,18 @@ class MultiTabFM:
         task_type = metadata.get('task_type')
         metric = metadata.get('evaluation_metric')
         eval_metrics = [metric] if metric else None
+
+        # Sampling target_table if max_samples is set
+        # NOTE: without this subsampling, DFS on training set will be slow and TabPFN will also be slow
+        # even if we turn on subsampling in TabPFN itself.
+        if len(train_data) > self.max_samples:
+            train_data = self._downsample_training_set(
+                train_data, 
+                target_column, 
+                task_type, 
+                self.max_samples, 
+                self.stratified_sampling
+            )
 
         # Prepare target dataframes
         X_train, Y_train = train_data.drop(columns=[target_column]), train_data[target_column]
@@ -196,6 +205,8 @@ class MultiTabFM:
 
         # 2. Train model (data already normalized) - TIMED
         fit_start = datetime.now()
+        dfs_seconds = (fit_start - load_dataset_end).total_seconds()
+        
         self.fit(train_data, label_column=target_column, task_type=task_type,
                 eval_metric=eval_metrics[0] if eval_metrics else None)
         fit_end = datetime.now()
@@ -215,6 +226,11 @@ class MultiTabFM:
 
         predict_end = datetime.now()
         predict_seconds = (predict_end - predict_start).total_seconds()
+        
+        # Calculate time to first batch prediction
+        import math
+        num_batches = math.ceil(len(X_test_transformed) / self.batch_size)
+        time_to_first_prediction = predict_seconds / num_batches if num_batches > 0 else 0
 
         # 4. Evaluate on normalized scale (following tab2graph's approach)
         metrics = None
@@ -227,9 +243,143 @@ class MultiTabFM:
         timing_info = {
             'fit_seconds': fit_seconds,
             'predict_seconds': predict_seconds,
-            'total_fit_predict_seconds': fit_seconds + predict_seconds
+            'total_fit_predict_seconds': fit_seconds + predict_seconds,
+            'dfs_seconds': dfs_seconds,
+            'time_to_first_prediction': time_to_first_prediction,
+            'num_batches': num_batches
         }
         
         print(f"\nTiming: fit={fit_seconds:.2f}s, predict={predict_seconds:.2f}s, total={timing_info['total_fit_predict_seconds']:.2f}s")
+        print(f"DFS time: {dfs_seconds:.2f}s, Time to first prediction: {time_to_first_prediction:.4f}s (batches: {num_batches})")
 
         return preds_or_proba, metrics, timing_info
+    
+    def _downsample_training_set(
+        self,
+        data: pd.DataFrame,
+        target_column: str,
+        task_type: str,
+        max_samples: int,
+        stratified_sampling: bool = False
+    ) -> pd.DataFrame:
+        """Downsample data to max_samples while preserving class balance for classification tasks.
+
+        Args:
+            data: Training DataFrame containing features and target
+            target_column: Name of the target column
+            task_type: Type of task ("regression" or "classification")
+            max_samples: Maximum number of samples to retain
+            stratified_sampling: If True, maintain class balance. If False, sample randomly
+                                 but ensure at least one sample per class for classification tasks.
+
+        Returns:
+            Downsampled DataFrame
+        """
+        if len(data) <= max_samples:
+            return data
+
+        logger.info(f"Downsampling training set from {len(data)} to {max_samples} samples.")
+        
+        X = data.drop(columns=[target_column])
+        y = data[target_column].values
+
+        if task_type == "regression":
+            # For regression tasks, we can just sample randomly
+            idx = np.random.choice(len(X), max_samples, replace=False)
+            return data.iloc[idx].reset_index(drop=True)
+
+        # For classification tasks, ensure at least one sample per class regardless of stratified_sampling
+        if not stratified_sampling:
+            # Even with random sampling, ensure at least one sample per class
+            unique_labels = np.unique(y)
+            
+            # First, pick one sample from each class
+            selected_indices = []
+            for label in unique_labels:
+                class_indices = np.where(y == label)[0]
+                if len(class_indices) > 0:
+                    selected_idx = np.random.choice(class_indices, 1)[0]
+                    selected_indices.append(selected_idx)
+
+            # Then randomly sample the rest
+            remaining_samples = max_samples - len(selected_indices)
+            if remaining_samples > 0:
+                # Create mask to exclude already selected indices
+                mask = np.ones(len(X), dtype=bool)
+                mask[selected_indices] = False
+                eligible_indices = np.where(mask)[0]
+
+                if len(eligible_indices) > 0:
+                    additional_indices = np.random.choice(
+                        eligible_indices,
+                        min(remaining_samples, len(eligible_indices)),
+                        replace=False
+                    )
+                    selected_indices.extend(additional_indices)
+
+            # Shuffle to avoid having all samples of one class together
+            np.random.shuffle(selected_indices)
+            idx = np.array(selected_indices)
+
+            # Log the class distribution in the sample
+            sampled_dist = np.unique(y[idx], return_counts=True)
+            logger.info(f"Random sample class distribution: {dict(zip(*sampled_dist))}")
+
+            return data.iloc[idx].reset_index(drop=True)
+
+        else:
+            # Get the unique labels and their counts
+            unique_labels, label_counts = np.unique(y, return_counts=True)
+            logger.info(f"Original label distribution: {dict(zip(unique_labels, label_counts))}")
+
+            # Calculate samples per class, ensuring all classes have at least one sample
+            n_classes = len(unique_labels)
+            # Determine samples per class with a minimum of 1
+            samples_per_class = max(1, max_samples // n_classes)
+
+            # Sample from each class
+            balanced_indices = []
+            remaining_indices = []
+
+            for label in unique_labels:
+                class_indices = np.where(y == label)[0]
+                if len(class_indices) == 0:
+                    continue
+
+                # If we have fewer samples than samples_per_class, take all of them (no replacement)
+                if len(class_indices) <= samples_per_class:
+                    balanced_indices.extend(class_indices)
+                else:
+                    # Sample without replacement
+                    sampled_indices = np.random.choice(class_indices, samples_per_class, replace=False)
+                    balanced_indices.extend(sampled_indices)
+
+                    # Store unused indices for potential additional sampling
+                    mask = np.ones(len(class_indices), dtype=bool)
+                    mask[np.isin(class_indices, sampled_indices)] = False
+                    remaining_indices.extend(class_indices[mask])
+
+            # If we haven't reached max_samples, sample from remaining indices
+            samples_needed = max_samples - len(balanced_indices)
+            if samples_needed > 0 and len(remaining_indices) > 0:
+                # Sample without replacement if possible, otherwise with replacement
+                additional_samples = np.random.choice(
+                    remaining_indices,
+                    min(samples_needed, len(remaining_indices)),
+                    replace=False
+                )
+                balanced_indices.extend(additional_samples)
+                logger.info(f"Added {len(additional_samples)} additional samples to balance the dataset")
+
+            # Shuffle the indices to avoid having all samples of one class together
+            np.random.shuffle(balanced_indices)
+
+            # Limit to max_samples in case we somehow exceeded it
+            balanced_indices = balanced_indices[:max_samples]
+            idx = np.array(balanced_indices)
+
+            # Log the new distribution
+            new_label_counts = np.unique(y[idx], return_counts=True)
+            logger.info(f"Balanced label distribution: {dict(zip(*new_label_counts))}")
+
+            return data.iloc[idx].reset_index(drop=True)

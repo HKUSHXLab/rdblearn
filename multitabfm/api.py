@@ -20,7 +20,7 @@ def train_and_predict(
     task_data_path: str,
     dfs_config: Optional[dict] = None,
     model_config: Optional[dict] = None,
-) -> Tuple[Union[pd.DataFrame, np.ndarray], Optional[dict]]:
+) -> Tuple[Union[pd.DataFrame, np.ndarray], Optional[dict], dict]:
     """End-to-end convenience function to train and predict.
 
     Args:
@@ -30,12 +30,14 @@ def train_and_predict(
         model_config: Optional model configuration dict
 
     Returns:
-        Tuple of (predictions, metrics). If eval_metrics is provided and labels are
-        available in the test set, metrics will be a dict; otherwise None.
+        Tuple of (predictions, metrics, timing_info).
+        - predictions: Model predictions
+        - metrics: Evaluation metrics dict if available, otherwise None
+        - timing_info: Dict with 'fit_seconds', 'predict_seconds', 'total_fit_predict_seconds'
     """
     engine = MultiTabFM(dfs_config=dfs_config, model_config=model_config)
-    preds, metrics = engine.train_and_predict(
+    preds, metrics, timing_info = engine.train_and_predict(
         rdb_data_path=rdb_data_path,
         task_data_path=task_data_path,
     )
-    return preds, metrics
+    return preds, metrics, timing_info

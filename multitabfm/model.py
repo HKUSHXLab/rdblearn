@@ -132,6 +132,7 @@ class CustomLimiX:
         inference_config: Optional[Union[str, Path]] = None,
         normalize_target: bool = True,
         device: Optional[Union[str, torch.device]] = None,
+        eval_metric: str = None,  # Accept but don't use - LimiX doesn't support eval_metric
         **predictor_kwargs,
     ) -> None:
         task_type = task_type.lower()
@@ -295,7 +296,10 @@ class AutoGluon:
         if self.task_type not in {"classification", "regression"}:
             raise ValueError("task_type must be 'classification' or 'regression'.")
         
-        self.problem_type = "binary" if self.task_type == "classification" else "regression"
+        if self.task_type == "regression":
+            self.problem_type = "regression"
+        else:
+            self.problem_type = None
         
         # Map metric names to AutoGluon's expected format
         if eval_metric and eval_metric.lower() in self.METRIC_MAPPING:
@@ -326,6 +330,12 @@ class AutoGluon:
             X = pd.DataFrame(X)
         if isinstance(y, np.ndarray):
             y = pd.Series(y)
+            
+        if self.problem_type is None and self.task_type == "classification":
+            if y.nunique() > 2:
+                self.problem_type = "multiclass"
+            else:
+                self.problem_type = "binary"
         
         train_data = X.copy()
         train_data['target'] = y.values
