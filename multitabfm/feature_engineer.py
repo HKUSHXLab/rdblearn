@@ -75,27 +75,6 @@ def _filter_array_columns(
     sanitized = df.drop(columns=array_cols, errors="ignore").copy()
     return sanitized, array_cols
 
-
-def _coerce_array_columns_to_strings(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
-    """Convert array-like entries into delimited strings so models see hashable values."""
-    if not columns:
-        return df
-
-    def _to_string(value: object) -> object:
-        if value is None or (isinstance(value, float) and np.isnan(value)):
-            return value
-        if _is_array_like(value):
-            if isinstance(value, np.ndarray):
-                value = value.tolist()
-            return ",".join(map(str, value))
-        return value
-
-    result = df.copy()
-    for col in columns:
-        if col in result.columns:
-            result[col] = result[col].apply(_to_string)
-    return result
-
 def prepare_for_dfs(
     X_train: pd.DataFrame,
     X_test: pd.DataFrame,
