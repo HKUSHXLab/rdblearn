@@ -1,3 +1,5 @@
+import os
+import tempfile
 from typing import Optional, List, Tuple, Union
 import pandas as pd
 import numpy as np
@@ -116,6 +118,19 @@ class MultiTabFM:
             - predictions: Model predictions
             - metrics: Evaluation metrics (if available)
             - timing_info: Dict with 'fit_seconds' and 'predict_seconds'
+        """
+        with tempfile.NamedTemporaryFile(suffix=".db") as temp_db_file:
+            self.dfs_config['engine_path'] = temp_db_file.name
+            
+            return self._train_and_predict_internal(
+                rdb_data_path,
+                task_data_path
+            )
+        
+    def _train_and_predict_internal(self,
+                         rdb_data_path: str,
+                         task_data_path: str) -> Tuple[Union[pd.DataFrame, np.ndarray, pd.Series], Optional[dict], dict]:
+        """Internal method for training and prediction with timing.
         """
         
         # Load dataset
