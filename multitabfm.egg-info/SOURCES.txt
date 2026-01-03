@@ -15,4 +15,4 @@ multitabfm.egg-info/top_level.txt
 tests/test_evaluation.py
 tests/test_feature_engineer.py
 tests/test_model.py
-tests/test_utils.py
+tests/test_regression.py
