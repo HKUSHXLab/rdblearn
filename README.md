@@ -20,7 +20,7 @@
 ### Core Components
 
 🔧 **FastDFS** - Efficient Deep Feature Synthesis for automated multi-table flattening.
-🤖 **RDBLearnEstimator** - A scikit-learn compatible estimator that integrates DFS and single-table models.
+🤖 **RDBLearn Estimators** - Scikit-learn compatible `RDBLearnClassifier` and `RDBLearnRegressor` that integrate DFS and single-table models.
 ⚡ **Foundation Models** - Seamless integration with TabPFN and other foundation models.
 
 ---
@@ -43,26 +43,41 @@ pip install -e .
 
 ## 🚀 Usage
 
-### Basic Example
+### Basic Example (RelBench rel-f1)
 
 ```python
-from rdblearn.estimator import RDBLearnEstimator
+from rdblearn.datasets import RDBDataset
+from rdblearn.estimator import RDBLearnClassifier
 from tabpfn import TabPFNClassifier
 
-# Initialize the estimator with a base model (e.g., TabPFN)
-clf = RDBLearnEstimator(
-    base_estimator=TabPFNClassifier(),
+# 1. Load RelBench dataset and task
+dataset = RDBDataset.from_relbench("rel-f1")
+task = dataset.tasks["driver-dnf"]
+
+# 2. Initialize the estimator with a base model (e.g., TabPFN)
+clf = RDBLearnClassifier(
+    base_estimator=TabPFNClassifier(device="cpu"), # or "cuda"
     config={
         "dfs": {"max_depth": 2},
         "max_train_samples": 1000
     }
 )
 
-# Fit on relational data (EntitySet)
-clf.fit(X=es, y=y)
+# 3. Fit on relational data
+X_train = task.train_df.drop(columns=[task.metadata.target_col])
+y_train = task.train_df[task.metadata.target_col]
 
-# Predict
-predictions = clf.predict(X=es_test)
+clf.fit(
+    X=X_train, 
+    y=y_train, 
+    rdb=dataset.rdb,
+    key_mappings=task.metadata.key_mappings,
+    cutoff_time_column=task.metadata.time_col
+)
+
+# 4. Predict
+X_test = task.test_df.drop(columns=[task.metadata.target_col])
+predictions = clf.predict(X=X_test)
 ```
 
 See `examples/` for more detailed usage.
