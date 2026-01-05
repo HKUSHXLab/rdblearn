@@ -14,12 +14,7 @@ except ImportError:
     sys.modules["relbench"] = mock_relbench
     sys.modules["relbench.tasks"] = mock_relbench.tasks
 
-try:
-    import fastdfs.adapter
-except ImportError:
-    from unittest.mock import MagicMock
-    mock_fastdfs = MagicMock()
-    sys.modules["fastdfs.adapter"] = mock_fastdfs.adapter
+import fastdfs.adapter
 
 from rdblearn.datasets import RDBDataset, Task, TaskMetadata
 
@@ -135,8 +130,9 @@ class TestRDBDataset(unittest.TestCase):
         mock_task_meta.name = "task1"
         mock_task_meta.target_column = "target"
         mock_task_meta.time_column = "timestamp"
-        mock_task_meta.task_type.value = "classification"
-        mock_task_meta.evaluation_metric.value = "auroc"
+        # Test both Enum-like and string-like task_type/metric
+        mock_task_meta.task_type = "classification"
+        mock_task_meta.evaluation_metric = MagicMock(value="auroc")
         
         # Mock columns for key_mappings
         mock_col = MagicMock()
@@ -158,6 +154,7 @@ class TestRDBDataset(unittest.TestCase):
         
         self.assertEqual(task.metadata.key_mappings, {"user_id": "users.id"})
         self.assertEqual(task.metadata.target_col, "target")
+        self.assertEqual(task.metadata.task_type, "classification")
         self.assertEqual(task.metadata.evaluation_metric, "auroc")
         
         mock_adapter_cls.assert_called_with("dummy_4db")
