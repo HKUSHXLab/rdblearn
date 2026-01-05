@@ -107,6 +107,46 @@ class TestRDBDataset(unittest.TestCase):
         mock_adapter_cls.assert_called_with("dummy_dataset")
         mock_relbench_tasks.get_task_names.assert_called_with("dummy_dataset")
 
+    @patch('relbench.tasks')
+    @patch('fastdfs.adapter.RelBenchAdapter')
+    def test_from_relbench_skip_link_prediction(self, mock_adapter_cls, mock_relbench_tasks):
+        # Mock RDB
+        mock_rdb = MagicMock()
+        
+        # Mock Adapter
+        mock_adapter = mock_adapter_cls.return_value
+        mock_adapter.load.return_value = mock_rdb
+        
+        # Mock Tasks: one binary classification, one link prediction
+        mock_relbench_tasks.get_task_names.return_value = ["task_ok", "task_skip"]
+        
+        mock_task_ok = MagicMock()
+        mock_task_ok.task_type.value = "binary_classification"
+        mock_task_ok.get_table.return_value.df = pd.DataFrame({'col': [1]})
+        mock_task_ok.entity_table = "users"
+        mock_task_ok.entity_col = "user_id"
+        mock_task_ok.target_col = "target"
+        mock_task_ok.time_col = "timestamp"
+        mock_task_ok.metrics = []
+        
+        mock_task_skip = MagicMock()
+        mock_task_skip.task_type.value = "link_prediction"
+        
+        def get_task_side_effect(dataset_name, task_name, download=True):
+            if task_name == "task_ok":
+                return mock_task_ok
+            return mock_task_skip
+            
+        mock_relbench_tasks.get_task.side_effect = get_task_side_effect
+        
+        # Call method
+        dataset = RDBDataset.from_relbench("dummy_dataset")
+        
+        # Assertions: only task_ok should be present
+        self.assertEqual(len(dataset.tasks), 1)
+        self.assertIn("task_ok", dataset.tasks)
+        self.assertNotIn("task_skip", dataset.tasks)
+
     @patch('fastdfs.adapter.DBInferAdapter')
     def test_from_4dbinfer(self, mock_adapter_cls):
         # Mock RDB

@@ -124,6 +124,11 @@ class RDBDataset:
             # Load task (download=True ensures it's available/generated)
             rb_task = relbench.tasks.get_task(dataset_name, task_name, download=True)
             
+            # Skip link prediction tasks as they are not supported yet
+            task_type_val = rb_task.task_type.value if hasattr(rb_task.task_type, "value") else rb_task.task_type
+            if task_type_val == "link_prediction":
+                continue
+
             # Get tables (convert to pandas)
             train_df = rb_task.get_table("train", mask_input_cols=False).df
             test_df = rb_task.get_table("test", mask_input_cols=False).df
