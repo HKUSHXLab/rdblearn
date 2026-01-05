@@ -10,42 +10,62 @@ This design moves away from the monolithic `train_and_predict` workflow of `mult
 
 ## 2. Core Abstractions
 
-### 2.1 Estimators
+### 2.1 Configuration
+
+To manage the various parameters for DFS, preprocessing, and sampling, we introduce a unified configuration class.
+
+```python
+from pydantic import BaseModel, Field
+from typing import Optional, Union, Dict, Any
+from fastdfs import DFSConfig
+
+class RDBLearnConfig(BaseModel):
+    """
+    Configuration for RDBLearnEstimator.
+    """
+    # DFS Configuration (passed to fastdfs)
+    # If None, defaults to: {"max_depth": 3, "agg_primitives": ["max", "min", "mean", "count", "mode", "std"], "engine": "dfs2sql"}
+    dfs: Optional[DFSConfig] = None
+    
+    # Preprocessing Configuration (passed to AutoGluon feature generator)
+    # If None, defaults to: {"enable_datetime_features": True, "enable_raw_text_features": False, ...}
+    ag_config: Optional[Dict[str, Any]] = None
+    
+    # Sampling Configuration
+    max_train_samples: int = 10000
+    stratified_sampling: bool = False  # Ignored for RDBLearnRegressor
+    
+    # Prediction Configuration
+    predict_batch_size: int = 5000
+
+    class Config:
+        arbitrary_types_allowed = True
+```
+
+### 2.2 Estimators
 
 We will provide two main classes: `RDBLearnClassifier` and `RDBLearnRegressor`.
 
 **Signature:**
 
 ```python
-from fastdfs import RDB, DFSConfig
-
 class RDBLearnEstimator:
     def __init__(
         self, 
         base_estimator, 
-        dfs_config: Optional[Union[dict, DFSConfig]] = None,
-        prep_config: Optional[dict] = None
+        config: Optional[Union[RDBLearnConfig, dict]] = None
     ):
         """
         Args:
             base_estimator: An instance of a scikit-learn compatible estimator 
                             (e.g., TabPFNClassifier, TabPFNRegressor).
-            dfs_config: Configuration for fastdfs. If None, defaults to:
-                        {
-                            "max_depth": 3,
-                            "agg_primitives": ["max", "min", "mean", "count", "mode", "std"],
-                            "engine": "dfs2sql"
-                        }
-            prep_config: Configuration for feature preprocessing. If None, defaults to:
-                        {
-                            "enable_datetime_features": True,
-                            "enable_raw_text_features": False,
-                            "enable_text_special_features": False,
-                            "enable_text_ngram_features": False,
-                        }
-                        Note: Categorical columns are automatically label-encoded before AG generation.
+            config: An instance of RDBLearnConfig or a dict. If None, default config is used.
         """
-        pass
+        self.base_estimator = base_estimator
+        if isinstance(config, dict):
+            self.config = RDBLearnConfig(**config)
+        else:
+            self.config = config or RDBLearnConfig()
 
     def fit(
         self, 
@@ -57,7 +77,8 @@ class RDBLearnEstimator:
         **kwargs
     ):
         """
-        1. **Downsampling**: Check `max_samples` in config. If X is larger, sample X and y *before* DFS to save time.
+        1. **Downsampling**: Check `self.config.max_train_samples`. If X is larger, sample X and y *before* DFS to save time.
+           - Uses `self.config.stratified_sampling` to determine sampling strategy.
         2. **RDB Transformation**: Apply standard RDB transforms to clean and prepare the database.
            Pipeline:
            - `HandleDummyTable()`: Remove tables with no columns.
@@ -66,8 +87,8 @@ class RDBLearnEstimator:
            - `RDBTransformWrapper(FilterColumn(drop_dtypes=["text"]))`: Drop text columns (not supported by TabPFN).
            - `RDBTransformWrapper(CanonicalizeTypes())`: Ensure consistent types.
            *Store the transformed RDB in `self.rdb_`.*
-        3. **Feature Augmentation**: Call `fastdfs.compute_dfs_features(self.rdb_, X, key_mappings, cutoff_time_column, config=self.dfs_config)`.
-        4. **Preprocessing**: Initialize and fit the feature preprocessor (AutoGluon generator). 
+        3. **Feature Augmentation**: Call `fastdfs.compute_dfs_features(self.rdb_, X, key_mappings, cutoff_time_column, config=self.config.dfs)`.
+        4. **Preprocessing**: Initialize and fit the feature preprocessor (AutoGluon generator) using `self.config.ag_config`. 
            - Store the fitted preprocessor in `self.preprocessor_`.
            - Transform the features.
         5. **Model Training**: Call `base_estimator.fit(X_transformed, y, **kwargs)`.
@@ -89,6 +110,7 @@ class RDBLearnEstimator:
         3. **Feature Augmentation**: Call `fastdfs.compute_dfs_features(selected_rdb, X, self.key_mappings, self.cutoff_time_column, ...)` using stored mappings.
         4. **Preprocessing**: Transform features using the *stored* `self.preprocessor_` from `fit`.
         5. **Prediction**: Call `base_estimator.predict(X_transformed, **kwargs)`.
+           - Respects `self.config.predict_batch_size` if implemented for memory management.
         """
         pass
 ```
@@ -103,13 +125,20 @@ For `RDBLearnRegressor`, the `output_type` (e.g., for probabilistic regression) 
 To facilitate benchmarking and usage with standard datasets (RelBench, 4DBInfer), we introduce `RDBDataset`.
 
 ```python
-@dataclass
-class Task:
+from pydantic import BaseModel
+class TaskMetadata(BaseModel):
+    key_mappings: Dict[str, str]
+    target_col: str
+    time_col: Optional[str] = None
+    task_type: Optional[str] = None
+    evaluation_metric: Optional[str] = None
+
+class Task(BaseModel):
     name: str
     train_df: pd.DataFrame
     test_df: pd.DataFrame
-    val_df: Optional[pd.DataFrame]
-    metadata: dict  # Contains key_mappings, time_col, target_col
+    val_df: Optional[pd.DataFrame] = None
+    metadata: TaskMetadata
 
 class RDBDataset:
     def __init__(self, rdb: RDB, tasks: List[Task]):
@@ -161,6 +190,7 @@ Here is how a user would use `rdblearn` with a RelBench dataset.
 ```python
 from rdblearn.datasets import RDBDataset
 from rdblearn.models import RDBLearnClassifier
+from rdblearn.config import RDBLearnConfig
 from tabpfn import TabPFNClassifier
 from fastdfs import DFSConfig
 
@@ -172,27 +202,34 @@ task = dataset.tasks["user-churn"]
 # User brings their own base estimator
 base_model = TabPFNClassifier(device='cuda', N_ensemble_configurations=32)
 
+# Configure RDBLearn (using dict or object)
+config_dict = {
+    "dfs": {"max_depth": 2, "engine": "dfs2sql"},
+    "max_train_samples": 5000,
+    "stratified_sampling": True
+}
+
 clf = RDBLearnClassifier(
     base_estimator=base_model,
-    dfs_config=DFSConfig(max_depth=2, engine="dfs2sql")
+    config=config_dict # Pydantic will validate this
 )
 
 # 3. Train
 # X_train does not contain the label. y_train is passed separately.
-X_train = task.train_df.drop(columns=[task.metadata["target_col"]])
-y_train = task.train_df[task.metadata["target_col"]]
+X_train = task.train_df.drop(columns=[task.metadata.target_col])
+y_train = task.train_df[task.metadata.target_col]
 
 clf.fit(
     X=X_train, 
     y=y_train, 
     rdb=dataset.rdb,
-    key_mappings=task.metadata["key_mappings"],
-    cutoff_time_column=task.metadata["time_col"]
+    key_mappings=task.metadata.key_mappings,
+    cutoff_time_column=task.metadata.time_col
 )
 
 # 4. Predict
-X_test = task.test_df.drop(columns=[task.metadata["target_col"]])
-y_test = task.test_df[task.metadata["target_col"]]
+X_test = task.test_df.drop(columns=[task.metadata.target_col])
+y_test = task.test_df[task.metadata.target_col]
 
 y_pred = clf.predict(
     X=X_test
