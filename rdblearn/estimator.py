@@ -133,6 +133,7 @@ class RDBLearnEstimator(BaseEstimator):
             return data.iloc[idx].reset_index(drop=True)
 
     def _prepare_rdb(self, rdb: RDB) -> RDB:
+        logger.info("Preparing RDB with transformation pipeline.")
         pipeline = RDBTransformPipeline([
             HandleDummyTable(),
             FillMissingPrimaryKey(),
@@ -176,7 +177,7 @@ class RDBLearnEstimator(BaseEstimator):
         self.cutoff_time_column_ = cutoff_time_column
 
         # 3. Feature Augmentation
-
+        logger.info("Computing DFS features...")
         dfs_config = self.config.dfs or DFSConfig()
         
         X_dfs = fastdfs.compute_dfs_features(
@@ -188,10 +189,12 @@ class RDBLearnEstimator(BaseEstimator):
         )
         
         # 4. Preprocessing
+        logger.info("Preprocessing augmented features ...")
         self.preprocessor_ = TabularPreprocessor(self.config.ag_config)
         X_transformed = self.preprocessor_.fit(X_dfs).transform(X_dfs)
         
         # 5. Model Training
+        logger.info("Fitting base estimator ...")
         self.base_estimator.fit(X_transformed, y, **kwargs)
         
         return self
@@ -208,6 +211,7 @@ class RDBLearnEstimator(BaseEstimator):
             selected_rdb = self._prepare_rdb(rdb)
             
         # 3. Feature Augmentation
+        logger.info("Computing DFS features...")
         
         dfs_config = self.config.dfs or DFSConfig()
         
@@ -220,9 +224,11 @@ class RDBLearnEstimator(BaseEstimator):
         )
         
         # 4. Preprocessing
+        logger.info("Preprocessing augmented features ...")
         X_transformed = self.preprocessor_.transform(X_dfs)
         
         # 5. Prediction
+        logger.info("Making predictions ...")
         predict_func = getattr(self.base_estimator, method)
         
         if self.config.predict_batch_size and len(X_transformed) > self.config.predict_batch_size:

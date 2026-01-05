@@ -147,7 +147,7 @@ class RDBDataset:
                 key_mappings=key_mappings,
                 target_col=rb_task.target_col,
                 time_col=rb_task.time_col,
-                task_type=rb_task.task_type.value,
+                task_type=rb_task.task_type.value if hasattr(rb_task.task_type, "value") else rb_task.task_type,
                 evaluation_metric=metric_name
             )
             
@@ -163,5 +163,51 @@ class RDBDataset:
 
     @classmethod
     def from_4dbinfer(cls, dataset_name: str):
-        # Uses fastdfs.adapter.dbinfer
-        raise NotImplementedError("4DBInfer adapter not implemented yet.")
+        try:
+            from fastdfs.adapter import DBInferAdapter
+        except ImportError as e:
+            raise ImportError("fastdfs must be installed to use from_4dbinfer") from e
+
+        # Load RDB
+        adapter = DBInferAdapter(dataset_name)
+        rdb = adapter.load()
+        
+        # The adapter stores the underlying DBBRDBDataset in self.dataset
+        dbb_dataset = adapter.dataset
+        
+        tasks = []
+        for dbb_task in dbb_dataset._tasks:
+            task_meta = dbb_task.metadata
+            
+            # Convert numpy dicts to DataFrames
+            train_df = pd.DataFrame(dbb_task.train_set)
+            test_df = pd.DataFrame(dbb_task.test_set)
+            val_df = pd.DataFrame(dbb_task.validation_set)
+            
+            # Metadata
+            # Find key mappings: look for foreign keys in the task table
+            key_mappings = {}
+            for col_schema in task_meta.columns:
+                if col_schema.dtype == "foreign_key":
+                    # link_to is in format "table.column"
+                    link_to = getattr(col_schema, "link_to", None)
+                    if link_to:
+                        key_mappings[col_schema.name] = link_to
+            
+            metadata = TaskMetadata(
+                key_mappings=key_mappings,
+                target_col=task_meta.target_column,
+                time_col=task_meta.time_column,
+                task_type=task_meta.task_type.value if hasattr(task_meta.task_type, "value") else task_meta.task_type,
+                evaluation_metric=task_meta.evaluation_metric.value if hasattr(task_meta.evaluation_metric, "value") else task_meta.evaluation_metric
+            )
+            
+            tasks.append(Task(
+                name=task_meta.name,
+                train_df=train_df,
+                test_df=test_df,
+                val_df=val_df,
+                metadata=metadata
+            ))
+            
+        return cls(rdb=rdb, tasks=tasks)

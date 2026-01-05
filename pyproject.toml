@@ -39,7 +39,7 @@ dependencies = [
     "scikit-learn",
     "autogluon.tabular>=1.0.0",
     "tabpfn>=6.0",
-    "fastdfs @ file:///root/git-repo/fastdfs"
+    # "fastdfs @ file:///root/git-repo/fastdfs"  Manually install fastdfs for now
 ]
 
 [project.optional-dependencies]

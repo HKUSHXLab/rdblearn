@@ -112,5 +112,56 @@ class TestRDBDataset(unittest.TestCase):
         mock_adapter_cls.assert_called_with("dummy_dataset")
         mock_relbench_tasks.get_task_names.assert_called_with("dummy_dataset")
 
+    @patch('fastdfs.adapter.DBInferAdapter')
+    def test_from_4dbinfer(self, mock_adapter_cls):
+        # Mock RDB
+        mock_rdb = MagicMock()
+        
+        # Mock Adapter
+        mock_adapter = mock_adapter_cls.return_value
+        mock_adapter.load.return_value = mock_rdb
+        
+        # Mock DBBRDBDataset
+        mock_dbb_dataset = MagicMock()
+        mock_adapter.dataset = mock_dbb_dataset
+        
+        # Mock Task
+        mock_dbb_task = MagicMock()
+        mock_dbb_task.train_set = {'col': [1]}
+        mock_dbb_task.test_set = {'col': [2]}
+        mock_dbb_task.validation_set = {'col': [3]}
+        
+        mock_task_meta = MagicMock()
+        mock_task_meta.name = "task1"
+        mock_task_meta.target_column = "target"
+        mock_task_meta.time_column = "timestamp"
+        mock_task_meta.task_type.value = "classification"
+        mock_task_meta.evaluation_metric.value = "auroc"
+        
+        # Mock columns for key_mappings
+        mock_col = MagicMock()
+        mock_col.name = "user_id"
+        mock_col.dtype = "foreign_key"
+        mock_col.link_to = "users.id"
+        mock_task_meta.columns = [mock_col]
+        
+        mock_dbb_task.metadata = mock_task_meta
+        mock_dbb_dataset._tasks = [mock_dbb_task]
+        
+        # Call method
+        dataset = RDBDataset.from_4dbinfer("dummy_4db")
+        
+        # Assertions
+        self.assertEqual(len(dataset.tasks), 1)
+        self.assertIn("task1", dataset.tasks)
+        task = dataset.tasks["task1"]
+        
+        self.assertEqual(task.metadata.key_mappings, {"user_id": "users.id"})
+        self.assertEqual(task.metadata.target_col, "target")
+        self.assertEqual(task.metadata.evaluation_metric, "auroc")
+        
+        mock_adapter_cls.assert_called_with("dummy_4db")
+        mock_adapter.load.assert_called_once()
+
 if __name__ == '__main__':
     unittest.main()

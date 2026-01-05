@@ -11,12 +11,12 @@ logger.enable("rdblearn")
 
 def main():
     # 1. Load Dataset
-    # This will download the 'rel-f1' dataset if not present and load the RDB.
-    print("Loading 'rel-f1' dataset...")
-    dataset = RDBDataset.from_relbench("rel-f1")
+    # This uses the DBInferAdapter internally to load the RDB and tasks
+    print("Loading 'diginetica' dataset from 4DBInfer...")
+    dataset = RDBDataset.from_4dbinfer("diginetica")
     
-    # Select the 'driver-dnf' task
-    task_name = "driver-dnf"
+    # Select the 'ctr' task
+    task_name = "ctr"
     if task_name not in dataset.tasks:
         raise ValueError(f"Task '{task_name}' not found in dataset. Available tasks: {list(dataset.tasks.keys())}")
     
@@ -32,9 +32,9 @@ def main():
     base_model = TabPFNClassifier(**TABPFN_DEFAULT_CONFIG)
 
     # Configure RDBLearn
-    # Use the default configuration (automatically loaded if config is None)
+    # Use DFS depth 1 for testing
     clf = RDBLearnClassifier(
-        base_estimator=base_model,
+        base_estimator=base_model
     )
 
     # 3. Train

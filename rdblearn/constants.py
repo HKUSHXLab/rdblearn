@@ -7,7 +7,7 @@ TABPFN_DEFAULT_CONFIG = {
 
 RDBLEARN_DEFAULT_CONFIG = {
     "dfs": {
-        "max_depth": 3,
+        "max_depth": 2,
         "agg_primitives": ["max", "min", "mean", "count", "mode", "std"],
         "engine": "dfs2sql"
     },
