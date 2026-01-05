@@ -8,9 +8,18 @@ logger.enable("rdblearn")
 # Ensure modules are loaded so we can patch them
 try:
     import relbench.tasks
+except ImportError:
+    from unittest.mock import MagicMock
+    mock_relbench = MagicMock()
+    sys.modules["relbench"] = mock_relbench
+    sys.modules["relbench.tasks"] = mock_relbench.tasks
+
+try:
     import fastdfs.adapter
 except ImportError:
-    pass
+    from unittest.mock import MagicMock
+    mock_fastdfs = MagicMock()
+    sys.modules["fastdfs.adapter"] = mock_fastdfs.adapter
 
 from rdblearn.datasets import RDBDataset, Task, TaskMetadata
 

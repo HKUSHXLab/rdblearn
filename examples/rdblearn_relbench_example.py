@@ -32,7 +32,6 @@ def main():
     # Use the default configuration (automatically loaded if config is None)
     clf = RDBLearnClassifier(
         base_estimator=base_model,
-        config={"dfs": {"max_depth": 1}}
     )
 
     # 3. Train
