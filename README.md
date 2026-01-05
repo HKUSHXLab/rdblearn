@@ -20,9 +20,9 @@
 
 ### Core Components
 
-🔧 **FastDFS** - Efficient Deep Feature Synthesis for automated multi-table flattening.
-🤖 **RDBLearn Estimators** - Scikit-learn compatible `RDBLearnClassifier` and `RDBLearnRegressor` that integrate DFS and single-table models.
-⚡ **Foundation Models** - Seamless integration with TabPFN and other foundation models for single table prediction tasks.
+* 🔧 **FastDFS** - Efficient Deep Feature Synthesis for automated multi-table flattening.
+* 🤖 **RDBLearn Estimators** - Scikit-learn compatible `RDBLearnClassifier` and `RDBLearnRegressor` that integrate DFS and single-table models.
+* ⚡ **Foundation Models** - Seamless integration with TabPFN and other foundation models for single table prediction tasks.
 
 ---
 
