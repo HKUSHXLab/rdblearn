@@ -13,6 +13,7 @@ from fastdfs.transform import (
 
 from .config import RDBLearnConfig
 from .preprocessing import TabularPreprocessor
+from .constants import RDBLEARN_DEFAULT_CONFIG
 
 
 class RDBLearnEstimator(BaseEstimator):
@@ -22,15 +23,29 @@ class RDBLearnEstimator(BaseEstimator):
         config: Optional[Union[RDBLearnConfig, dict]] = None
     ):
         self.base_estimator = base_estimator
-        if isinstance(config, dict):
-            self.config = RDBLearnConfig(**config)
+        
+        if isinstance(config, RDBLearnConfig):
+            self.config = config
         else:
-            self.config = config or RDBLearnConfig()
+            # Start with defaults
+            config_dict = RDBLEARN_DEFAULT_CONFIG.copy()
+            # Update with user provided dict if any
+            if isinstance(config, dict):
+                config_dict.update(config)
+            
+            self.config = RDBLearnConfig(**config_dict)
             
         self.rdb_ = None
         self.preprocessor_ = None
         self.key_mappings_ = None
         self.cutoff_time_column_ = None
+
+    def _ensure_keys_are_strings(self, X: pd.DataFrame, key_mappings: Dict[str, str]) -> pd.DataFrame:
+        X = X.copy()
+        for col in key_mappings.keys():
+            if col in X.columns:
+                X[col] = X[col].astype(str)
+        return X
 
     def _downsample(
         self,
@@ -136,6 +151,9 @@ class RDBLearnEstimator(BaseEstimator):
         cutoff_time_column: Optional[str] = None,
         **kwargs
     ):
+        # 0. Ensure keys are strings
+        X = self._ensure_keys_are_strings(X, key_mappings)
+
         # 1. Downsampling
         if len(X) > self.config.max_train_samples:
             data = X.copy()
@@ -179,6 +197,10 @@ class RDBLearnEstimator(BaseEstimator):
         return self
 
     def _predict_common(self, X: pd.DataFrame, rdb: Optional[RDB], method: str, **kwargs):
+        # 0. Ensure keys are strings
+        if self.key_mappings_:
+            X = self._ensure_keys_are_strings(X, self.key_mappings_)
+
         # 2. RDB Selection
         if rdb is None:
             selected_rdb = self.rdb_

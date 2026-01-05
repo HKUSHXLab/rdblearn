@@ -4,3 +4,14 @@ TABPFN_DEFAULT_CONFIG = {
     "device": "cuda",
     "n_preprocessing_jobs": -1
 }
+
+RDBLEARN_DEFAULT_CONFIG = {
+    "dfs": {
+        "max_depth": 3,
+        "agg_primitives": ["max", "min", "mean", "count", "mode", "std"],
+        "engine": "dfs2sql"
+    },
+    "max_train_samples": 10000,
+    "stratified_sampling": False,
+    "predict_batch_size": 5000
+}

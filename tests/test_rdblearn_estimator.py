@@ -4,8 +4,12 @@ import numpy as np
 from unittest.mock import MagicMock
 from rdblearn.estimator import RDBLearnClassifier, RDBLearnRegressor
 from rdblearn.config import RDBLearnConfig
+from rdblearn.constants import RDBLEARN_DEFAULT_CONFIG
 from fastdfs import RDB, DFSConfig
 from fastdfs.api import create_rdb
+
+from loguru import logger
+logger.enable("rdblearn")
 
 class MockTabPFNClassifier:
     def __init__(self, **kwargs):
@@ -170,6 +174,23 @@ class TestRDBLearnEstimator(unittest.TestCase):
         self.assertIsInstance(clf.config, RDBLearnConfig)
         self.assertEqual(clf.config.max_train_samples, 80)
         self.assertIsNotNone(clf.config.dfs)
+
+    def test_config_override(self):
+        # Test 1: Default config
+        base_model = MockTabPFNClassifier()
+        clf = RDBLearnClassifier(base_estimator=base_model)
+        self.assertEqual(clf.config.max_train_samples, RDBLEARN_DEFAULT_CONFIG["max_train_samples"])
+        self.assertEqual(clf.config.dfs.max_depth, RDBLEARN_DEFAULT_CONFIG["dfs"]["max_depth"])
+
+        # Test 2: Partial override
+        override_config = {"max_train_samples": 500}
+        clf = RDBLearnClassifier(base_estimator=base_model, config=override_config)
+        
+        # Check overridden value
+        self.assertEqual(clf.config.max_train_samples, 500)
+        
+        # Check preserved default value (nested)
+        self.assertEqual(clf.config.dfs.max_depth, RDBLEARN_DEFAULT_CONFIG["dfs"]["max_depth"])
 
 if __name__ == '__main__':
     unittest.main()

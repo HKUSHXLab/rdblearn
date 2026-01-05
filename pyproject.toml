@@ -39,7 +39,7 @@ dependencies = [
     "PyYAML",
     "scikit-learn",
     "autogluon.tabular>=1.0.0",
-    "tabpfn==2.1.3",
+    "tabpfn>=6.0",
     "fastdfs @ file:///root/git-repo/fastdfs"
 ]
 
