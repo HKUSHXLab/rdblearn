@@ -9,6 +9,7 @@
 - [Introduction](#-introduction)
 - [Installation](#️-installation)
 - [Usage](#-usage)
+- [Core API Reference](#-core-api-reference)
 - [License](#-license)
 
 ---
@@ -84,6 +85,43 @@ See `examples/` for more detailed usage.
 
 ---
 
-## 📜 License
+## � Core API Reference
+
+### `RDBDataset`
+The central class for managing relational data and task-specific tables.
+
+- **`from_relbench(dataset_name: str) -> RDBDataset`**: Load a dataset from the RelBench benchmark.
+- **`from_4dbinfer(dataset_name: str) -> RDBDataset`**: Load a dataset from the 4DBInfer benchmark.
+- **`save(path: str)`**: Save the RDB and all associated tasks to disk.
+- **`load(path: str) -> RDBDataset`**: Load a previously saved dataset from disk.
+
+### `RDBLearnClassifier` / `RDBLearnRegressor`
+Scikit-learn compatible estimators for relational learning.
+
+- **`__init__(base_estimator, config: Optional[dict] = None)`**:
+    - `base_estimator`: A single-table estimator (e.g., `TabPFNClassifier`, `AutoGluonClassifier`).
+    - `config`: Optional dictionary to override default DFS or sampling settings.
+- **`fit(X, y, rdb, key_mappings, cutoff_time_column=None, **kwargs)`**:
+    - `X`: Training features (DataFrame).
+    - `y`: Training labels (Series).
+    - `rdb`: The relational database context (`fastdfs.RDB`).
+    - `key_mappings`: Dictionary mapping columns in `X` to `table.primary_key` in the RDB.
+    - `cutoff_time_column`: Optional column name in `X` representing the time of the observation.
+- **`predict(X, rdb=None, **kwargs)`**:
+    - `X`: Test features.
+    - `rdb`: Optional RDB context (uses the one from `fit` if not provided).
+- **`predict_proba(X, rdb=None, **kwargs)`**: (Classifier only) Predict class probabilities.
+
+### `TaskMetadata`
+Data structure containing task-specific information.
+- `key_mappings`: Dict[str, str]
+- `target_col`: str
+- `time_col`: Optional[str]
+- `task_type`: Optional[str]
+- `evaluation_metric`: Optional[str]
+
+---
+
+## �📜 License
 
 This project is licensed under the MIT License.
