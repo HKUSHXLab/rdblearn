@@ -62,12 +62,7 @@ def main():
     
     # 5. Evaluate
     # TabPFN returns probabilities for all classes. For binary classification, we usually take the probability of the positive class (index 1).
-    if y_pred_proba.shape[1] == 2:
-        y_scores = y_pred_proba[:, 1]
-    else:
-        y_scores = y_pred_proba[:, 1] # Assuming index 1 is the positive class
-
-    auc = roc_auc_score(y_test, y_scores)
+    auc = roc_auc_score(y_test, y_pred_proba[:, 1])
     print(f"Test AUC: {auc:.4f}")
 
 if __name__ == "__main__":
