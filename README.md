@@ -85,7 +85,7 @@ See `examples/` for more detailed usage.
 
 ---
 
-## � Core API Reference
+## Core API Reference
 
 ### `RDBDataset`
 The central class for managing relational data and task-specific tables.
@@ -120,8 +120,24 @@ Data structure containing task-specific information.
 - `task_type`: Optional[str]
 - `evaluation_metric`: Optional[str]
 
+### LimiX Integration
+`rdblearn.utils` provides wrappers to adapt LimiX predictors into scikit-learn compatible estimators.
+
+- **`LimiXWrapperClassifier(predictor)`**: Wrapper for classification tasks.
+    - `predictor`: An initialized `LimiXPredictor` instance.
+    - `fit(X, y)`: Stores training data for in-context inference.
+    - `predict(X)`: Returns class labels.
+    - `predict_proba(X)`: Returns class probabilities.
+
+- **`LimiXWrapperRegressor(predictor)`**: Wrapper for regression tasks.
+    - `predictor`: An initialized `LimiXPredictor` instance.
+    - `fit(X, y)`: Stores training data.
+    - `predict(X)`: Returns predicted values.
+
+**Note**: You must install LimiX separately and provide an initialized `LimiXPredictor` to these wrappers.
+
 ---
 
-## �📜 License
+## 📜 License
 
 This project is licensed under the MIT License.
