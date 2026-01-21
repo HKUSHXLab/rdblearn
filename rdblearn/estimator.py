@@ -181,13 +181,13 @@ class RDBLearnEstimator(BaseEstimator):
         dfs_config = self.config.dfs or DFSConfig()
         
         X_dfs = fastdfs.compute_dfs_features(
-            self.rdb_, 
-            X, 
-            key_mappings=key_mappings, 
-            cutoff_time_column=cutoff_time_column, 
+            self.rdb_,
+            X,
+            key_mappings=key_mappings,
+            cutoff_time_column=cutoff_time_column,
             config=dfs_config
         )
-        
+
         # 4. Preprocessing
         logger.info("Preprocessing augmented features ...")
         self.preprocessor_ = TabularPreprocessor(self.config.ag_config)

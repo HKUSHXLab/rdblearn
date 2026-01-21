@@ -5,6 +5,7 @@ import yaml
 import pandas as pd
 from pydantic import BaseModel
 from fastdfs import RDB, load_rdb
+from fastdfs.dataset.meta import RDBColumnDType
 
 class TaskMetadata(BaseModel):
     key_mappings: Dict[str, str]
@@ -190,14 +191,39 @@ class RDBDataset:
             val_df = pd.DataFrame(dbb_task.validation_set)
             
             # Metadata
-            # Find key mappings: look for foreign keys in the task table
+            # Find key mappings from both foreign keys and primary key + target_table
             key_mappings = {}
+            
+            # 1. Add mappings for foreign keys in the task table
             for col_schema in task_meta.columns:
                 if col_schema.dtype == "foreign_key":
                     # link_to is in format "table.column"
                     link_to = getattr(col_schema, "link_to", None)
                     if link_to:
                         key_mappings[col_schema.name] = link_to
+            
+            # 2. Also add primary key + target_table mapping if it exists
+            # This handles cases like stackexchange::upvote where task.Id -> Posts.Id
+            target_table = getattr(task_meta, "target_table", None)
+            if target_table:
+                # Find primary key column in task data
+                task_pk_col = None
+                for col_schema in task_meta.columns:
+                    if col_schema.dtype == "primary_key":
+                        task_pk_col = col_schema.name
+                        break
+                
+                # Only add if not already mapped via FK
+                if task_pk_col and task_pk_col not in key_mappings:
+                    # Find primary key of target table in RDB
+                    try:
+                        table_meta = rdb.get_table_metadata(target_table)
+                        table_pk = table_meta.primary_key
+                        if table_pk:
+                            key_mappings[task_pk_col] = f"{target_table}.{table_pk}"
+                    except ValueError:
+                        # Target table not found in RDB, skip
+                        pass
             
             metadata = TaskMetadata(
                 key_mappings=key_mappings,
@@ -214,5 +240,41 @@ class RDBDataset:
                 val_df=val_df,
                 metadata=metadata
             ))
+        
+        # Apply correction for stackexchange upvote task:
+        # Increase timestamp column's value by one second
+        # This is needed because the timestamp in the original task table match the ones in RDB, so FastDFS cannot join the features.
+        if dataset_name == "stackexchange":
+            # The data types of these Id columns are float because it's a mix of NaN and int values.
+            # Convert them to string
+            def convert_series(series: pd.Series) -> pd.Series:
+                series.where(series.isna(), series.astype('Int64').astype(str), inplace=True)
+
+            # Convert all primary keys and foreign keys in all tables using convert_series
+            for table_name in rdb.table_names:
+                table = rdb.tables[table_name]
+                metadata = rdb.get_table_metadata(table_name)
+                
+                for col_schema in metadata.columns:
+                    col_name = col_schema.name
+                    if col_schema.dtype in [RDBColumnDType.primary_key, RDBColumnDType.foreign_key]:
+                        if col_name in table.columns:
+                            convert_series(table[col_name])
+            
+            for task in tasks:
+                convert_series(task.train_df['Id'])
+                convert_series(task.val_df['Id'])
+                convert_series(task.test_df['Id'])
+                if task.name == "upvote":
+                    time_col = task.metadata.time_col
+                    if time_col is not None:
+                        # Add one second to the timestamp column in train, test, and val dataframes
+                        if time_col in task.train_df.columns:
+                            task.train_df[time_col] = task.train_df[time_col] + pd.Timedelta(seconds=1)
+                        if time_col in task.test_df.columns:
+                            task.test_df[time_col] = task.test_df[time_col] + pd.Timedelta(seconds=1)
+                        if task.val_df is not None and time_col in task.val_df.columns:
+                            task.val_df[time_col] = task.val_df[time_col] + pd.Timedelta(seconds=1)
             
         return cls(rdb=rdb, tasks=tasks)
+

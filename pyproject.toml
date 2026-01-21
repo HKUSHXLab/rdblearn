@@ -38,7 +38,7 @@ dependencies = [
     "loguru",
     "scikit-learn",
     "autogluon.tabular>=1.0.0",
-    "tabpfn>=6.0",
+    "tabpfn>=6.3.0",
     # "fastdfs @ file:///root/git-repo/fastdfs"  Manually install fastdfs for now
 ]
 
@@ -51,6 +51,11 @@ dev = [
     "isort>=5.10.0",
     "flake8>=5.0.0",
     "mypy>=1.0.0",
+]
+
+benchmarking = [
+    "relbench==1.1.0",
+    "wandb==0.24.0",
 ]
 
 
