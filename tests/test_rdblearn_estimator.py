@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from unittest.mock import MagicMock
 from rdblearn.estimator import RDBLearnClassifier, RDBLearnRegressor
-from rdblearn.config import RDBLearnConfig
+from rdblearn.config import RDBLearnConfig, TemporalDiffConfig
 from rdblearn.constants import RDBLEARN_DEFAULT_CONFIG
 from fastdfs import RDB, DFSConfig
 from fastdfs.api import create_rdb
@@ -191,6 +191,30 @@ class TestRDBLearnEstimator(unittest.TestCase):
         
         # Check preserved default value (nested)
         self.assertEqual(clf.config.dfs.max_depth, RDBLEARN_DEFAULT_CONFIG["dfs"]["max_depth"])
+
+    def test_classifier_with_temporal_diff(self):
+        """Test classifier with temporal diff feature enabled."""
+        base_model = MockTabPFNClassifier()
+        temporal_config = TemporalDiffConfig(enabled=True, time_unit="days")
+        config = RDBLearnConfig(temporal_diff=temporal_config)
+        clf = RDBLearnClassifier(base_estimator=base_model, config=config)
+
+        clf.fit(
+            self.X_train,
+            self.y_train_cls,
+            rdb=self.rdb,
+            key_mappings=self.key_mappings,
+            cutoff_time_column=self.cutoff_time_column
+        )
+
+        # Verify preprocessor has temporal transformer
+        self.assertIsNotNone(clf.preprocessor_.temporal_transformer)
+        self.assertTrue(clf.preprocessor_.temporal_transformer.is_fitted_)
+
+        # Predict should work
+        preds = clf.predict(self.X_test)
+        self.assertEqual(len(preds), 20)
+
 
 if __name__ == '__main__':
     unittest.main()

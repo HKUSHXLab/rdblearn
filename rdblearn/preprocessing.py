@@ -31,7 +31,7 @@ class TemporalDiffTransformer:
     def fit(self, X_dfs: pd.DataFrame) -> 'TemporalDiffTransformer':
         self.timestamp_columns_ = [
             col for col in X_dfs.columns
-            if '_timestamp' in col and col not in self.config.exclude_columns
+            if '_epochtime' in col and col not in self.config.exclude_columns
         ]
         if self.timestamp_columns_:
             logger.info(f"TemporalDiffTransformer: Found {len(self.timestamp_columns_)} timestamp columns for transformation.")
