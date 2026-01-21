@@ -159,4 +159,4 @@ echo ""
 wait
 
 echo ""
-echo "All agents have completed."
+echo "If you pressed Ctrl+C, please run 'wandb agent --cancel ${AGENT_PATH}' to stop the agents."
