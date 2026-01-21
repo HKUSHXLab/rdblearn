@@ -15,7 +15,6 @@ from .config import RDBLearnConfig
 from .preprocessing import TabularPreprocessor
 from .constants import RDBLEARN_DEFAULT_CONFIG
 
-
 class RDBLearnEstimator(BaseEstimator):
     def __init__(
         self, 
@@ -137,7 +136,7 @@ class RDBLearnEstimator(BaseEstimator):
         pipeline = RDBTransformPipeline([
             HandleDummyTable(),
             FillMissingPrimaryKey(),
-            RDBTransformWrapper(FeaturizeDatetime(features=["year", "month", "day", "hour", "dayofweek"])),
+            RDBTransformWrapper(FeaturizeDatetime(features=["timestamp"])),
             RDBTransformWrapper(FilterColumn(drop_dtypes=["text"])),
             RDBTransformWrapper(CanonicalizeTypes()),
         ])
@@ -190,8 +189,13 @@ class RDBLearnEstimator(BaseEstimator):
 
         # 4. Preprocessing
         logger.info("Preprocessing augmented features ...")
-        self.preprocessor_ = TabularPreprocessor(self.config.ag_config)
-        X_transformed = self.preprocessor_.fit(X_dfs).transform(X_dfs)
+        self.preprocessor_ = TabularPreprocessor(
+            ag_config=self.config.ag_config,
+            temporal_diff_config=self.config.temporal_diff
+        )
+        cutoff_time = X[cutoff_time_column] if cutoff_time_column else None
+        self.preprocessor_.fit(X_dfs, cutoff_time=cutoff_time)
+        X_transformed = self.preprocessor_.transform(X_dfs, cutoff_time=cutoff_time)
         
         # 5. Model Training
         logger.info("Fitting base estimator ...")
@@ -222,10 +226,12 @@ class RDBLearnEstimator(BaseEstimator):
             cutoff_time_column=self.cutoff_time_column_, 
             config=dfs_config
         )
-        
+
+
         # 4. Preprocessing
         logger.info("Preprocessing augmented features ...")
-        X_transformed = self.preprocessor_.transform(X_dfs)
+        cutoff_time = X[self.cutoff_time_column_] if self.cutoff_time_column_ else None
+        X_transformed = self.preprocessor_.transform(X_dfs, cutoff_time=cutoff_time)
         
         # 5. Prediction
         logger.info("Making predictions ...")

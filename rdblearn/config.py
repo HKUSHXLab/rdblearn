@@ -1,6 +1,16 @@
 from pydantic import BaseModel, Field
-from typing import Optional, Union, Dict, Any
+from typing import Optional, Union, Dict, Any, List
+from dataclasses import dataclass, field
 from fastdfs import DFSConfig
+
+
+class TemporalDiffConfig(BaseModel):
+    """Configuration for temporal difference feature generation."""
+    enabled: bool = True
+    time_unit: str = "days"  # "seconds", "minutes", "hours", "days"
+    # Columns to explicitly exclude from transformation
+    exclude_columns: List[str] = Field(default_factory=list)
+
 
 class RDBLearnConfig(BaseModel):
     """
@@ -20,6 +30,9 @@ class RDBLearnConfig(BaseModel):
     
     # Prediction Configuration
     predict_batch_size: int = 5000
+
+    # Temporal Difference Configuration (post-DFS transformation)
+    temporal_diff: Optional[TemporalDiffConfig] = None
 
     class Config:
         arbitrary_types_allowed = True
