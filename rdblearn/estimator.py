@@ -136,7 +136,7 @@ class RDBLearnEstimator(BaseEstimator):
         pipeline = RDBTransformPipeline([
             HandleDummyTable(),
             FillMissingPrimaryKey(),
-            RDBTransformWrapper(FeaturizeDatetime(features=["timestamp"])),
+            RDBTransformWrapper(FeaturizeDatetime(features=["epochtime"])),
             RDBTransformWrapper(FilterColumn(drop_dtypes=["text"])),
             RDBTransformWrapper(CanonicalizeTypes()),
         ])
