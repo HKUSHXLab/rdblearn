@@ -15,3 +15,5 @@ RDBLEARN_DEFAULT_CONFIG = {
     "stratified_sampling": False,
     "predict_batch_size": 5000
 }
+
+TARGET_HISTORY_TABLE_NAME = "_RDL_target_history"

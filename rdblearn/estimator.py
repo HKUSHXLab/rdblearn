@@ -13,7 +13,7 @@ from fastdfs.transform import (
 
 from .config import RDBLearnConfig
 from .preprocessing import TabularPreprocessor
-from .constants import RDBLEARN_DEFAULT_CONFIG
+from .constants import RDBLEARN_DEFAULT_CONFIG, TARGET_HISTORY_TABLE_NAME
 
 class RDBLearnEstimator(BaseEstimator):
     def __init__(
@@ -38,13 +38,16 @@ class RDBLearnEstimator(BaseEstimator):
         self.preprocessor_ = None
         self.key_mappings_ = None
         self.cutoff_time_column_ = None
+        
+        self.history_df_ = None
+        self.target_history_fks_ = None
+        self.train_cutoff_time_column_ = None
 
-    def _ensure_keys_are_strings(self, X: pd.DataFrame, key_mappings: Dict[str, str]) -> pd.DataFrame:
-        X = X.copy()
+    def _ensure_keys_are_strings(self, X: pd.DataFrame, key_mappings: Dict[str, str]) -> None:
+        """Modifies X in place."""
         for col in key_mappings.keys():
             if col in X.columns:
                 X[col] = X[col].astype(str)
-        return X
 
     def _downsample(
         self,
@@ -132,6 +135,22 @@ class RDBLearnEstimator(BaseEstimator):
             return data.iloc[idx].reset_index(drop=True)
 
     def _prepare_rdb(self, rdb: RDB) -> RDB:
+        # Augment with target history if enabled and available
+        if (
+            self.config.enable_target_augmentation 
+            and self.history_df_ is not None 
+            and self.target_history_fks_ is not None
+            and self.train_cutoff_time_column_ is not None
+        ):
+            logger.info(f"Augmenting RDB with {TARGET_HISTORY_TABLE_NAME} table.")
+                
+            rdb = rdb.add_table(
+                dataframe=self.history_df_,
+                name=TARGET_HISTORY_TABLE_NAME,
+                time_column=self.train_cutoff_time_column_,
+                foreign_keys=self.target_history_fks_
+            )
+
         logger.info("Preparing RDB with transformation pipeline.")
         pipeline = RDBTransformPipeline([
             HandleDummyTable(),
@@ -151,12 +170,40 @@ class RDBLearnEstimator(BaseEstimator):
         cutoff_time_column: Optional[str] = None,
         **kwargs
     ):
-        # 0. Ensure keys are strings
-        X = self._ensure_keys_are_strings(X, key_mappings)
+        # 0. Copy and ensure keys are string
+        X = X.copy()
+        self._ensure_keys_are_strings(X, key_mappings)
+        self.key_mappings_ = key_mappings
+        self.cutoff_time_column_ = cutoff_time_column
+        
+        # 1. Setup Target History Augmentation (Using FULL X, y)
+        if self.config.enable_target_augmentation:
+            if cutoff_time_column is None:
+                logger.debug("enable_target_augmentation is True but cutoff_time_column is None. Skipping augmentation to prevent leakage.")
+            else:
+                logger.info("Storing target history for augmentation.")
+                
+                # Create history dataframe (using current X which is the full train set)
+                self.history_df_ = X.copy()
+                target_col = y.name or "_RDL_target"
+                self.history_df_[target_col] = y.copy()
+                
+                self.train_cutoff_time_column_ = cutoff_time_column
+                
+                # Construct foreign keys for the history table
+                self.target_history_fks_ = []
+                for x_col, rdb_ref in key_mappings.items():
+                    if "." in rdb_ref:
+                        rdb_table, rdb_col = rdb_ref.split(".", 1)
+                        # (this_table, this_col, other_table, other_col)
+                        self.target_history_fks_.append((x_col, rdb_table, rdb_col))
 
-        # 1. Downsampling
+        # 2. RDB Transformation (Augments RDB using stored history)
+        self.rdb_ = self._prepare_rdb(rdb)
+
+        # 3. Downsampling (Modifies X and y for training)
         if len(X) > self.config.max_train_samples:
-            data = X.copy()
+            data = X
             target_col = y.name or "target"
             data[target_col] = y
             
@@ -170,12 +217,7 @@ class RDBLearnEstimator(BaseEstimator):
             X = downsampled_data.drop(columns=[target_col])
             y = downsampled_data[target_col]
 
-        # 2. RDB Transformation
-        self.rdb_ = self._prepare_rdb(rdb)
-        self.key_mappings_ = key_mappings
-        self.cutoff_time_column_ = cutoff_time_column
-
-        # 3. Feature Augmentation
+        # 4. Feature Augmentation
         logger.info("Computing DFS features...")
         dfs_config = self.config.dfs or DFSConfig()
         
@@ -187,7 +229,7 @@ class RDBLearnEstimator(BaseEstimator):
             config=dfs_config
         )
 
-        # 4. Preprocessing
+        # 5. Preprocessing
         logger.info("Preprocessing augmented features ...")
         self.preprocessor_ = TabularPreprocessor(
             ag_config=self.config.ag_config,
@@ -196,21 +238,23 @@ class RDBLearnEstimator(BaseEstimator):
         )
         X_transformed = self.preprocessor_.fit(X_dfs).transform(X_dfs)
         
-        # 5. Model Training
+        # 6. Model Training
         logger.info("Fitting base estimator ...")
         self.base_estimator.fit(X_transformed, y, **kwargs)
         
         return self
 
     def _predict_common(self, X: pd.DataFrame, rdb: Optional[RDB], method: str, **kwargs):
-        # 0. Ensure keys are strings
+        # 0. Copy and ensure keys are string
+        X = X.copy()
         if self.key_mappings_:
-            X = self._ensure_keys_are_strings(X, self.key_mappings_)
+            self._ensure_keys_are_strings(X, self.key_mappings_)
 
         # 2. RDB Selection
         if rdb is None:
             selected_rdb = self.rdb_
         else:
+            # Augment new RDB with stored training history!
             selected_rdb = self._prepare_rdb(rdb)
             
         # 3. Feature Augmentation
