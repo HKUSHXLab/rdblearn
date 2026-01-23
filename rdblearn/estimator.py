@@ -232,17 +232,29 @@ class RDBLearnEstimator(BaseEstimator):
         predict_func = getattr(self.base_estimator, method)
         
         if self.config.predict_batch_size and len(X_transformed) > self.config.predict_batch_size:
-             results = []
-             for i in range(0, len(X_transformed), self.config.predict_batch_size):
-                 batch = X_transformed.iloc[i:i+self.config.predict_batch_size]
-                 results.append(predict_func(batch, **kwargs))
+            results = []
+            for i in range(0, len(X_transformed), self.config.predict_batch_size):
+                batch = X_transformed.iloc[i:i+self.config.predict_batch_size]
+                results.append(predict_func(batch, **kwargs))
              
-             if isinstance(results[0], np.ndarray):
-                 return np.concatenate(results)
-             elif isinstance(results[0], (pd.Series, pd.DataFrame)):
-                 return pd.concat(results, axis=0)
-             else:
-                 return np.concatenate(results)
+            if isinstance(results[0], dict):
+                # Aggregate dictionary results
+                aggregated = {}
+                for key in results[0].keys():
+                    key_results = [r[key] for r in results]
+                    if isinstance(key_results[0], np.ndarray):
+                        aggregated[key] = np.concatenate(key_results)
+                    elif isinstance(key_results[0], (pd.Series, pd.DataFrame)):
+                        aggregated[key] = pd.concat(key_results, axis=0)
+                    else:
+                        print(f"Warning: Unexpected type of key_results: {type(key_results[0])} when aggregating results for key {key}, skipping this key")
+                return aggregated
+            elif isinstance(results[0], np.ndarray):
+                return np.concatenate(results)
+            elif isinstance(results[0], (pd.Series, pd.DataFrame)):
+                return pd.concat(results, axis=0)
+            else:
+                return np.concatenate(results)
         else:
             return predict_func(X_transformed, **kwargs)
 

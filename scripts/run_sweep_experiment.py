@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 import torch
 import wandb
-from sklearn.metrics import roc_auc_score, mean_squared_error, accuracy_score
+from sklearn.metrics import roc_auc_score, mean_squared_error, accuracy_score, r2_score
 
 from rdblearn.datasets import RDBDataset
 from rdblearn.estimator import RDBLearnClassifier, RDBLearnRegressor
@@ -81,7 +81,7 @@ class CustomTabPFN:
                 n_estimators=self.n_estimators,
                 ignore_pretraining_limits=True,  # Allow datasets larger than 10K samples
                 device=self.device,
-                n_preprocessing_jobs=self.n_preprocessing_jobs
+                n_preprocessing_jobs=self.n_preprocessing_jobs,
             )
         else:
             self.model = TabPFNClassifier(
@@ -124,12 +124,14 @@ class CustomTabPFN:
 
         output_type = None
         if self.task_type == "regression":
-            output_type = "median"
+            output_type = "main"
 
         preds = self.model.predict(X, output_type=output_type)
 
         # Ensure numpy array output
-        if isinstance(preds, (pd.Series, pd.DataFrame)):
+        if isinstance(preds, dict):
+            return preds
+        elif isinstance(preds, (pd.Series, pd.DataFrame)):
             return preds.to_numpy().ravel()
         else:
             return np.asarray(preds).ravel()
@@ -297,6 +299,10 @@ class CustomLimiX:
 
 # Model paths configuration
 MODEL_PATHS = {
+    "tabpfn_v2": {
+        "classification": "/root/.cache/tabpfn/tabpfn-v2-classifier-finetuned-zk73skhh.ckpt",
+        "regression": "/root/.cache/tabpfn/tabpfn-v2-regressor.ckpt",
+    },
     "tabpfn_v2.5": {
         "classification": "/root/autodl-tmp/tabpfn_2_5/tabpfn-v2.5-classifier-v2.5_default.ckpt",
         "regression": "/root/autodl-tmp/tabpfn_2_5/tabpfn-v2.5-regressor-v2.5_default.ckpt",
@@ -322,30 +328,8 @@ def get_base_estimator(model_pair_name: str, task_type_str: str):
     Returns:
         A sklearn-compatible estimator instance
     """
-    if model_pair_name == "tabpfn_v2":
-        # Use standard TabPFN package
-        from tabpfn import TabPFNClassifier, TabPFNRegressor
-        
-        if task_type_str == "classification":
-            return TabPFNClassifier(
-                device="cuda",
-                n_estimators=8,
-                ignore_pretraining_limits=True,
-                # Sometimes it says download fail so we give local path directly
-                model_path="/root/.cache/tabpfn/tabpfn-v2-classifier-finetuned-zk73skhh.ckpt"
-            )
-        else:
-            return TabPFNRegressor(
-                device="cuda",
-                n_estimators=8,
-                ignore_pretraining_limits=True,
-                # Ditto
-                model_path="/root/.cache/tabpfn/tabpfn-v2-regressor.ckpt"
-            )
-    
-    elif model_pair_name == "tabpfn_v2.5":
-        # Use CustomTabPFN with v2.5 checkpoint
-        model_path = MODEL_PATHS["tabpfn_v2.5"][task_type_str]
+    if model_pair_name in ["tabpfn_v2", "tabpfn_v2.5"]:
+        model_path = MODEL_PATHS[model_pair_name][task_type_str]
         return CustomTabPFN(
             model_path=model_path,
             task_type=task_type_str,
@@ -411,26 +395,46 @@ def compute_metrics(y_true, y_pred, task_type: str, metric_name: str = None):
             metrics["test_score"] = acc
     else:
         # Regression metrics
-        y_pred_values = np.asarray(y_pred).ravel()
-        y_true_values = np.asarray(y_true).ravel()
-        
-        mse = mean_squared_error(y_true_values, y_pred_values)
-        rmse = np.sqrt(mse)
-        mae = np.mean(np.abs(y_true_values - y_pred_values))
+        if isinstance(y_pred, dict):
+            assert "mean" in y_pred and "median" in y_pred, "y_pred must contain 'mean' and 'median' keys"
+            print("Prediction is a dictionary including 'mean' and 'median' keys")
+            y_pred_mean = y_pred["mean"]
+            y_pred_median = y_pred["median"]
 
-        # Calculate r-squared (even though it is more meaningful for regression, sometimes informative for classification probabilities)
-        try:
-            from sklearn.metrics import r2_score
-            r2 = r2_score(y_true_values, y_pred_values)
+            y_pred_mean_values = np.asarray(y_pred_mean).ravel()
+            y_pred_median_values = np.asarray(y_pred_median).ravel()
+            y_true_values = np.asarray(y_true).ravel()
+
+            # Calculate MSE and RMSE for mean prediction
+            mse = mean_squared_error(y_true_values, y_pred_mean_values)
+            rmse = np.sqrt(mse)
+            r2 = r2_score(y_true_values, y_pred_mean_values)
+
+            mae = np.mean(np.abs(y_true_values - y_pred_median_values))
+
             metrics["r2"] = r2
-        except Exception as e:
-            print(f"Warning: Could not compute R2 score: {e}")
-        
-        metrics["mse"] = mse
-        metrics["rmse"] = rmse
-        metrics["mae"] = mae
-        # Use MAE for test_score
-        metrics["test_score"] = mae
+            metrics["mse"] = mse
+            metrics["rmse"] = rmse
+            metrics["mae"] = mae
+            # Use MAE for test_score
+            metrics["test_score"] = mae
+
+        else:
+            y_pred_values = np.asarray(y_pred).ravel()
+            y_true_values = np.asarray(y_true).ravel()
+            
+            mse = mean_squared_error(y_true_values, y_pred_values)
+            rmse = np.sqrt(mse)
+            r2 = r2_score(y_true_values, y_pred_values)
+
+            mae = np.mean(np.abs(y_true_values - y_pred_values))
+
+            metrics["r2"] = r2
+            metrics["mse"] = mse
+            metrics["rmse"] = rmse
+            metrics["mae"] = mae
+            # Use MAE for test_score
+            metrics["test_score"] = mae
     
     return metrics
 
