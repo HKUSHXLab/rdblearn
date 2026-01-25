@@ -124,6 +124,13 @@ def compute_comparison(
     # Calculate improvement rate
     improvement_rate = (improved_count / total_count * 100) if total_count > 0 else 0.0
 
+    # Reorder columns to ensure test_r2 comes after delta_test
+    desired_order = ['Dataset', 'Task', 'Metric', 'Direction', 'DFS_Depth',
+                     'model_name', 'dev_metric', 'test_metric', 'delta_test', 'test_r2']
+    # Only include columns that exist in the DataFrame
+    final_columns = [col for col in desired_order if col in comparison_df.columns]
+    comparison_df = comparison_df[final_columns]
+
     return comparison_df, improvement_rate
 
 

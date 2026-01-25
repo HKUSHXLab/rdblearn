@@ -99,6 +99,9 @@ class WandBClient:
         if dev_metric is None or test_metric is None:
             return None
 
+        # Get test_r2 (optional, may not exist for all runs)
+        test_r2 = summary.get('test_metric/r2')
+
         # Standardize names using mappings
         if adapter_type == 'relbench':
             dataset_display = RELBENCH_DATASET_MAP.get(dataset_name, dataset_name)
@@ -112,7 +115,7 @@ class WandBClient:
 
         model_display = MODEL_MAP.get(model_name, model_name)
 
-        return {
+        result = {
             'Adapter': adapter_type,
             'Dataset': dataset_display,
             'Task': task_display,
@@ -123,6 +126,14 @@ class WandBClient:
             'dev_metric': float(dev_metric),
             'test_metric': float(test_metric),
         }
+
+        # Add test_r2 if available
+        if test_r2 is not None:
+            result['test_r2'] = float(test_r2)
+        else:
+            result['test_r2'] = None
+
+        return result
 
 
 def fetch_sweep_as_detailed_table(sweep_id: str) -> pd.DataFrame:

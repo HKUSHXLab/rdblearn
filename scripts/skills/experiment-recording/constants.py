@@ -77,10 +77,10 @@ MAIN_SHEET_NAME = "Main"
 
 DETAILED_COLUMNS = [
     'Adapter', 'Dataset', 'Task', 'Metric', 'Direction',
-    'DFS_Depth', 'model_name', 'dev_metric', 'test_metric'
+    'DFS_Depth', 'model_name', 'dev_metric', 'test_metric', 'test_r2'
 ]
 
 COMPARISON_COLUMNS = [
     'Dataset', 'Task', 'Metric', 'Direction',
-    'DFS_Depth', 'model_name', 'dev_metric', 'test_metric', 'delta_test'
+    'DFS_Depth', 'model_name', 'dev_metric', 'test_metric', 'delta_test', 'test_r2'
 ]
