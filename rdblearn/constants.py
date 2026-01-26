@@ -16,4 +16,4 @@ RDBLEARN_DEFAULT_CONFIG = {
     "predict_batch_size": 5000
 }
 
-TARGET_HISTORY_TABLE_NAME = "_RDL_target_history"
+TARGET_HISTORY_TABLE_NAME = "_RDBL_target_history"

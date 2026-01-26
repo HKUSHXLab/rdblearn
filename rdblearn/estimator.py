@@ -150,6 +150,8 @@ class RDBLearnEstimator(BaseEstimator):
                 time_column=self.train_cutoff_time_column_,
                 foreign_keys=self.target_history_fks_
             )
+            rdb = rdb.canonicalize_key_types()
+            rdb.validate_key_consistency()
 
         logger.info("Preparing RDB with transformation pipeline.")
         pipeline = RDBTransformPipeline([
@@ -185,7 +187,7 @@ class RDBLearnEstimator(BaseEstimator):
                 
                 # Create history dataframe (using current X which is the full train set)
                 self.history_df_ = X.copy()
-                target_col = y.name or "_RDL_target"
+                target_col = y.name or "_RDBL_target"
                 self.history_df_[target_col] = y.copy()
                 
                 self.train_cutoff_time_column_ = cutoff_time_column
@@ -204,7 +206,7 @@ class RDBLearnEstimator(BaseEstimator):
         # 3. Downsampling (Modifies X and y for training)
         if len(X) > self.config.max_train_samples:
             data = X
-            target_col = y.name or "target"
+            target_col = y.name or "_RDBL_target"
             data[target_col] = y
             
             task_type = "regression" if isinstance(self, RegressorMixin) else "classification"
@@ -228,6 +230,7 @@ class RDBLearnEstimator(BaseEstimator):
             cutoff_time_column=cutoff_time_column,
             config=dfs_config
         )
+        logger.debug(f"DFS features: {X_dfs.columns.tolist()}")
 
         # 5. Preprocessing
         logger.info("Preprocessing augmented features ...")

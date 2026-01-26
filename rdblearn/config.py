@@ -16,7 +16,7 @@ class RDBLearnConfig(BaseModel):
     Configuration for RDBLearnEstimator.
     """
     # DFS Configuration (passed to fastdfs)
-    # If None, defaults to: {"max_depth": 3, "agg_primitives": ["max", "min", "mean", "count", "mode", "std"], "engine": "dfs2sql"}
+    # If None, defaults to: {"max_depth": 2, "agg_primitives": ["max", "min", "mean", "count", "mode", "std"], "engine": "dfs2sql"}
     dfs: Optional[DFSConfig] = None
     
     # Preprocessing Configuration (passed to AutoGluon feature generator)
