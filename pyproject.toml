@@ -37,9 +37,9 @@ dependencies = [
     "numpy",
     "loguru",
     "scikit-learn",
-    "autogluon.tabular>=1.0.0",
+    "autogluon.tabular>=1.5.0",
     "tabpfn>=6.3.0",
-    # "fastdfs @ file:///root/git-repo/fastdfs"  Manually install fastdfs for now
+    "fastdfs @ file:///root/git-repo/fastdfs",
 ]
 
 [project.optional-dependencies]
@@ -54,8 +54,8 @@ dev = [
 ]
 
 benchmarking = [
-    "relbench==1.1.0",
-    "wandb==0.24.0",
+    "relbench>=2.0.2",
+    "wandb>=0.24.0",
 ]
 
 

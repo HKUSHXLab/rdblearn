@@ -29,6 +29,14 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 CONFIG_DIR="${PROJECT_ROOT}/config"
 SWEEP_CONFIG="${CONFIG_DIR}/sweep_config.yaml"
 
+# Enable virtual environment if it exists
+if [ -d "${PROJECT_ROOT}/.venv" ]; then
+    echo "Activating virtual environment at ${PROJECT_ROOT}/.venv"
+    source "${PROJECT_ROOT}/.venv/bin/activate"
+else
+    echo "Warning: No .venv found at ${PROJECT_ROOT}. Using system python."
+fi
+
 echo "============================================================"
 echo "RDBLearn WandB Sweep Launcher"
 echo "============================================================"

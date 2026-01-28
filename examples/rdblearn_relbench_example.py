@@ -11,12 +11,12 @@ logger.enable("rdblearn")
 
 def main():
     # 1. Load Dataset
-    # This will download the 'rel-f1' dataset if not present and load the RDB.
-    print("Loading 'rel-f1' dataset...")
-    dataset = RDBDataset.from_relbench("rel-f1")
+    # This will download the 'rel-avito' dataset if not present and load the RDB.
+    print("Loading 'rel-avito' dataset...")
+    dataset = RDBDataset.from_relbench("rel-avito")
     
-    # Select the 'driver-dnf' task
-    task_name = "driver-dnf"
+    # Select the 'ad-ctr' task
+    task_name = "ad-ctr"
     if task_name not in dataset.tasks:
         raise ValueError(f"Task '{task_name}' not found in dataset. Available tasks: {list(dataset.tasks.keys())}")
     
@@ -35,6 +35,11 @@ def main():
     # Use the default configuration (automatically loaded if config is None)
     clf = RDBLearnClassifier(
         base_estimator=base_model,
+        config={
+            "dfs": {
+                "max_depth": 4,
+            }
+        }
     )
 
     # 3. Train
@@ -51,6 +56,7 @@ def main():
         cutoff_time_column=task.metadata.time_col
     )
     print("Training complete.")
+    exit(0)
 
     # 4. Predict
     print("Predicting on test set...")
