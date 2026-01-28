@@ -72,17 +72,17 @@ class TabularPreprocessor:
 
     def fit(self, X: pd.DataFrame):
         """Fit the preprocessor on training data."""
-        X_processed = X.copy()
+        X_numeric = X.copy()
 
         # 1. Fit temporal features if enabled
         if self.temporal_transformer:
-            self.temporal_transformer.fit(X_processed)
+            self.temporal_transformer.fit(X_numeric)
         
         # 2. Fit LabelEncoders
-        cat_columns = X_processed.select_dtypes(include=['object', 'category']).columns.tolist()
+        cat_columns = X_numeric.select_dtypes(include=['object', 'category']).columns.tolist()
         for col in cat_columns:
             le = LabelEncoder()
-            X_processed[col] = le.fit_transform(X_processed[col].astype(str))
+            X_numeric[col] = le.fit_transform(X_numeric[col].astype(str))
             self.label_encoders[col] = le
             
         # 3. Fit AutoGluon Feature Generator
@@ -96,7 +96,7 @@ class TabularPreprocessor:
             default_ag_config.update(self.ag_config)
             
         self.feature_generator = AutoMLPipelineFeatureGenerator(**default_ag_config)
-        self.feature_generator.fit(X=X_processed)
+        self.feature_generator.fit(X=X_numeric)
         return self
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -104,22 +104,22 @@ class TabularPreprocessor:
         if self.feature_generator is None:
             raise RuntimeError("Preprocessor not fitted.")
 
-        X_processed = X.copy()
+        X_numeric = X.copy()
 
         # 1. Apply temporal difference transformation
         if self.temporal_transformer and self.cutoff_time is not None:
-            cutoff_time = X_processed[self.cutoff_time]
-            X_processed = self.temporal_transformer.transform(X_processed, cutoff_time)
+            cutoff_time = X_numeric[self.cutoff_time]
+            X_numeric = self.temporal_transformer.transform(X_numeric, cutoff_time)
         
         # 2. Apply LabelEncoders
         for col, le in self.label_encoders.items():
-            if col in X_processed.columns:
-                vals = X_processed[col].astype(str)
+            if col in X_numeric.columns:
+                vals = X_numeric[col].astype(str)
                 unseen_mask = ~vals.isin(le.classes_)
                 if unseen_mask.any():
                     le.classes_ = np.append(le.classes_, vals[unseen_mask].unique())
                 
-                X_processed[col] = le.transform(vals)
+                X_numeric[col] = le.transform(vals)
         
         # 3. Apply AutoGluon Feature Generator
-        return self.feature_generator.transform(X_processed)
+        return self.feature_generator.transform(X_numeric)
