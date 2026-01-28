@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from unittest.mock import MagicMock
 from rdblearn.estimator import RDBLearnClassifier, RDBLearnRegressor
-from rdblearn.config import RDBLearnConfig
+from rdblearn.config import RDBLearnConfig, TemporalDiffConfig
 from rdblearn.constants import RDBLEARN_DEFAULT_CONFIG
 from fastdfs import RDB, DFSConfig
 from fastdfs.api import create_rdb
@@ -191,6 +191,39 @@ class TestRDBLearnEstimator(unittest.TestCase):
         
         # Check preserved default value (nested)
         self.assertEqual(clf.config.dfs.max_depth, RDBLEARN_DEFAULT_CONFIG["dfs"]["max_depth"])
+
+    def test_classifier_with_temporal_diff(self):
+        """Test classifier with temporal diff feature enabled."""
+        base_model = MockTabPFNClassifier()
+        temporal_config = TemporalDiffConfig(enabled=True, exclude_columns=[])
+        config = RDBLearnConfig(
+            temporal_diff=temporal_config,
+            dfs=DFSConfig(
+                agg_primitives=["max", "min", "mean", "std", "count"],
+                max_depth=2
+            )
+        )
+        clf = RDBLearnClassifier(base_estimator=base_model, config=config)
+
+        clf.fit(
+            self.X_train,
+            self.y_train_cls,
+            rdb=self.rdb,
+            key_mappings=self.key_mappings,
+            cutoff_time_column=self.cutoff_time_column
+        )
+
+        self.assertIsNotNone(clf.preprocessor_.temporal_transformer)
+        self.assertTrue(clf.preprocessor_.temporal_transformer.is_fitted_)
+
+        # Verify that expected diff columns are present after fitting
+        x_fit_cols = clf.base_estimator.X_fit.columns
+        self.assertTrue(any(c.endswith('_diff') for c in x_fit_cols))
+        self.assertFalse(any('timestamp_epochtime' in c and 'diff' not in c for c in x_fit_cols))
+
+        preds = clf.predict(self.X_test)
+        self.assertEqual(len(preds), 20)
+
 
 if __name__ == '__main__':
     unittest.main()
