@@ -899,7 +899,7 @@ wheels = [
 [[package]]
 name = "fastdfs"
 version = "0.2.0"
-source = { directory = "../fastdfs" }
+source = { git = "ssh://git@github.com/dglai/fastdfs.git#49e9f9c7e8231a1dcec93cd194023da447464437" }
 dependencies = [
     { name = "boto3" },
     { name = "duckdb" },
@@ -921,38 +921,6 @@ dependencies = [
     { name = "sqlglot" },
     { name = "tqdm" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "black", marker = "extra == 'dev'", specifier = ">=22.0.0" },
-    { name = "boto3" },
-    { name = "duckdb" },
-    { name = "featuretools" },
-    { name = "flake8", marker = "extra == 'dev'", specifier = ">=5.0.0" },
-    { name = "isort", marker = "extra == 'dev'", specifier = ">=5.10.0" },
-    { name = "loguru" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=0.991" },
-    { name = "numpy" },
-    { name = "pandas", specifier = ">=2.3.3,<3.0" },
-    { name = "psutil" },
-    { name = "psycopg2-binary", marker = "extra == 'all'" },
-    { name = "psycopg2-binary", marker = "extra == 'postgres'" },
-    { name = "pyarrow", specifier = "<21.0.0" },
-    { name = "pydantic" },
-    { name = "pymysql", marker = "extra == 'all'" },
-    { name = "pymysql", marker = "extra == 'mysql'" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
-    { name = "pyyaml" },
-    { name = "requests" },
-    { name = "scikit-learn" },
-    { name = "scipy" },
-    { name = "sql-formatter" },
-    { name = "sqlalchemy" },
-    { name = "sqlglot", specifier = ">=27.8.0,<28.0.0" },
-    { name = "tqdm" },
-]
-provides-extras = ["dev", "postgres", "mysql", "all"]
 
 [[package]]
 name = "featuretools"
@@ -3150,7 +3118,7 @@ dev = [
 requires-dist = [
     { name = "autogluon-tabular", specifier = ">=1.5.0" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=22.0.0" },
-    { name = "fastdfs", directory = "../fastdfs" },
+    { name = "fastdfs", git = "ssh://git@github.com/dglai/fastdfs.git" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=5.0.0" },
     { name = "isort", marker = "extra == 'dev'", specifier = ">=5.10.0" },
     { name = "loguru" },
