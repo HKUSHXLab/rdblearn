@@ -7,13 +7,6 @@ from autogluon.features.generators import AutoMLPipelineFeatureGenerator
 from loguru import logger
 from .config import TemporalDiffConfig
 
-# Timestamp conversion: nanoseconds to time units
-NANO_TO_TIME_UNIT = {
-    "seconds": 1e9,
-    "minutes": 1e9 * 60,
-    "hours": 1e9 * 3600,
-    "days": 1e9 * 86400,
-}
 
 class TemporalDiffTransformer:
     def __init__(self, config: TemporalDiffConfig):
@@ -45,44 +38,42 @@ class TemporalDiffTransformer:
             return X_dfs
 
         result = X_dfs.copy()
-        
-        if pd.api.types.is_datetime64_any_dtype(cutoff_time):
-            cutoff_nano = cutoff_time.astype('int64')
-        else:
-            cutoff_nano = pd.to_numeric(cutoff_time, errors='coerce')
-
-        nano_to_unit = NANO_TO_TIME_UNIT.get(self.config.time_unit, NANO_TO_TIME_UNIT["days"])
+        cutoff_nano = (cutoff_time.astype('datetime64[ns]') - np.array(0).astype('datetime64[ns]')).astype('int64')
 
         for col in self.timestamp_columns_:
             if col not in result.columns:
                 continue
-            
-            timestamp_nano = pd.to_numeric(result[col], errors='coerce')
-            time_diff = (cutoff_nano - timestamp_nano) / nano_to_unit
-            
+
+            # Timestamp columns already converted to int64 nanoseconds by fastdfs
+            timestamp_nano = result[col].values
+
+            # Calculate time difference and convert to float (following RDBColumnDType.float_t practice)
+            time_diff = (cutoff_nano - timestamp_nano).astype('float64')
+
             sanitized_name = self._sanitize_column_name(col)
-            feature_name = f"{sanitized_name}.{self.config.time_unit}_since"
-            
+            feature_name = f"{sanitized_name}_diff"
+
             result[feature_name] = time_diff
             result = result.drop(columns=[col])
-            
+
         logger.info(f"TemporalDiffTransformer: Generated {len(self.timestamp_columns_)} temporal difference features.")
         return result
 
 class TabularPreprocessor:
-    def __init__(self, ag_config: Optional[Dict[str, Any]] = None, temporal_diff_config: Optional[TemporalDiffConfig] = None):
+    def __init__(self, ag_config: Optional[Dict[str, Any]] = None, temporal_diff_config: Optional[TemporalDiffConfig] = None, cutoff_time: Optional[str] = None):
         self.ag_config = ag_config or {}
         self.temporal_diff_config = temporal_diff_config
+        self.cutoff_time = cutoff_time
         self.label_encoders = {}
         self.feature_generator = None
         self.temporal_transformer = None
         if self.temporal_diff_config and self.temporal_diff_config.enabled:
             self.temporal_transformer = TemporalDiffTransformer(self.temporal_diff_config)
 
-    def fit(self, X: pd.DataFrame, cutoff_time: Optional[pd.Series] = None):
+    def fit(self, X: pd.DataFrame):
         """Fit the preprocessor on training data."""
         X_processed = X.copy()
-        
+
         # 1. Fit temporal features if enabled
         if self.temporal_transformer:
             self.temporal_transformer.fit(X_processed)
@@ -108,15 +99,16 @@ class TabularPreprocessor:
         self.feature_generator.fit(X=X_processed)
         return self
 
-    def transform(self, X: pd.DataFrame, cutoff_time: Optional[pd.Series] = None) -> pd.DataFrame:
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
         """Transform features."""
         if self.feature_generator is None:
             raise RuntimeError("Preprocessor not fitted.")
-        
+
         X_processed = X.copy()
 
         # 1. Apply temporal difference transformation
-        if self.temporal_transformer and cutoff_time is not None:
+        if self.temporal_transformer and self.cutoff_time is not None:
+            cutoff_time = X_processed[self.cutoff_time]
             X_processed = self.temporal_transformer.transform(X_processed, cutoff_time)
         
         # 2. Apply LabelEncoders

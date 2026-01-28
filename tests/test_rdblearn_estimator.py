@@ -195,8 +195,14 @@ class TestRDBLearnEstimator(unittest.TestCase):
     def test_classifier_with_temporal_diff(self):
         """Test classifier with temporal diff feature enabled."""
         base_model = MockTabPFNClassifier()
-        temporal_config = TemporalDiffConfig(enabled=True, time_unit="days")
-        config = RDBLearnConfig(temporal_diff=temporal_config)
+        temporal_config = TemporalDiffConfig(enabled=True, exclude_columns=[])
+        config = RDBLearnConfig(
+            temporal_diff=temporal_config,
+            dfs=DFSConfig(
+                agg_primitives=["max", "min", "mean", "std", "count"],
+                max_depth=2
+            )
+        )
         clf = RDBLearnClassifier(base_estimator=base_model, config=config)
 
         clf.fit(
@@ -207,11 +213,14 @@ class TestRDBLearnEstimator(unittest.TestCase):
             cutoff_time_column=self.cutoff_time_column
         )
 
-        # Verify preprocessor has temporal transformer
         self.assertIsNotNone(clf.preprocessor_.temporal_transformer)
         self.assertTrue(clf.preprocessor_.temporal_transformer.is_fitted_)
 
-        # Predict should work
+        # Verify that expected diff columns are present after fitting
+        x_fit_cols = clf.base_estimator.X_fit.columns
+        self.assertTrue(any(c.endswith('_diff') for c in x_fit_cols))
+        self.assertFalse(any('timestamp_epochtime' in c and 'diff' not in c for c in x_fit_cols))
+
         preds = clf.predict(self.X_test)
         self.assertEqual(len(preds), 20)
 

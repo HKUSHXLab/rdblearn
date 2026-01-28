@@ -191,11 +191,10 @@ class RDBLearnEstimator(BaseEstimator):
         logger.info("Preprocessing augmented features ...")
         self.preprocessor_ = TabularPreprocessor(
             ag_config=self.config.ag_config,
-            temporal_diff_config=self.config.temporal_diff
+            temporal_diff_config=self.config.temporal_diff,
+            cutoff_time=cutoff_time_column
         )
-        cutoff_time = X[cutoff_time_column] if cutoff_time_column else None
-        self.preprocessor_.fit(X_dfs, cutoff_time=cutoff_time)
-        X_transformed = self.preprocessor_.transform(X_dfs, cutoff_time=cutoff_time)
+        X_transformed = self.preprocessor_.fit(X_dfs).transform(X_dfs)
         
         # 5. Model Training
         logger.info("Fitting base estimator ...")
@@ -230,8 +229,7 @@ class RDBLearnEstimator(BaseEstimator):
 
         # 4. Preprocessing
         logger.info("Preprocessing augmented features ...")
-        cutoff_time = X[self.cutoff_time_column_] if self.cutoff_time_column_ else None
-        X_transformed = self.preprocessor_.transform(X_dfs, cutoff_time=cutoff_time)
+        X_transformed = self.preprocessor_.transform(X_dfs)
         
         # 5. Prediction
         logger.info("Making predictions ...")

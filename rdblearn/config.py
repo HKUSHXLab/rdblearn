@@ -7,7 +7,6 @@ from fastdfs import DFSConfig
 class TemporalDiffConfig(BaseModel):
     """Configuration for temporal difference feature generation."""
     enabled: bool = True
-    time_unit: str = "days"  # "seconds", "minutes", "hours", "days"
     # Columns to explicitly exclude from transformation
     exclude_columns: List[str] = Field(default_factory=list)
 
