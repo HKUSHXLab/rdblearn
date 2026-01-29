@@ -40,6 +40,8 @@ dependencies = [
     "autogluon.tabular>=1.5.0",
     "tabpfn>=6.3.0",
     "fastdfs @ git+ssh://git@github.com/dglai/fastdfs.git",
+    "relbench==1.1.0",
+    "wandb>=0.24.0",
 ]
 
 [project.optional-dependencies]
@@ -51,11 +53,6 @@ dev = [
     "isort>=5.10.0",
     "flake8>=5.0.0",
     "mypy>=1.0.0",
-]
-
-benchmarking = [
-    "relbench>=2.0.2",
-    "wandb>=0.24.0",
 ]
 
 

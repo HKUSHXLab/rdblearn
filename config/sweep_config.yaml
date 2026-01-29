@@ -1,7 +1,14 @@
 # WandB Sweep Configuration for RDBLearn Experiments
 # Usage: wandb sweep config/sweep_config.yaml
 
-program: scripts/run_sweep_experiment.py
+command:                                                                                          
+    - uv                                                                                            
+    - run
+    - --no-sync                                                                                           
+    - python                                                                                        
+    - ${program}                                                                                    
+    - ${args}                                                                                       
+program: scripts/run_sweep_experiment.py 
 method: grid  # Exhaustive grid search (use 'random' or 'bayes' for hyperparameter tuning)
 
 metric:
@@ -64,7 +71,10 @@ parameters:
   max_train_samples:
     value: 10000
   dfs_max_depth:
-    value: 2
+    values:
+      - 2
+      - 3
+      - 4
 
 # Optional: Early termination for failing runs
 # early_terminate:
