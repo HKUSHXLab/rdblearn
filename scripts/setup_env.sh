@@ -38,9 +38,20 @@ else
     echo "Warning: Current directory is not a git repository. Skipping update."
 fi
 
-# 2. Install uv if not present
+# 2. Clone LimiX repository
 echo ""
-echo "[2/3] Checking for uv..."
+echo "[2/4] Cloning LimiX repository..."
+if [ -d "${PROJECT_ROOT}/LimiX" ]; then
+    echo "  - LimiX already exists at ${PROJECT_ROOT}/LimiX. Pulling latest..."
+    cd "${PROJECT_ROOT}/LimiX" && git pull
+else
+    echo "  - Cloning LimiX into ${PROJECT_ROOT}/LimiX..."
+    git clone https://github.com/limix-ldm/LimiX.git "${PROJECT_ROOT}/LimiX"
+fi
+
+# 3. Install uv if not present
+echo ""
+echo "[3/4] Checking for uv..."
 if ! command -v uv &> /dev/null; then
     echo "  - uv not found. Installing..."
     # Try different installation methods if needed, but pip usually works if python is present
@@ -49,9 +60,9 @@ else
     echo "  - uv is already installed ($(uv --version))"
 fi
 
-# 3. Sync environment
+# 4. Sync environment
 echo ""
-echo "[3/3] Syncing environment with uv..."
+echo "[4/4] Syncing environment with uv..."
 cd "${PROJECT_ROOT}"
 # Use --locked to ensure lock file is respected and not updated
 uv sync --locked

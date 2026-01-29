@@ -41,7 +41,7 @@ from rdblearn.estimator import RDBLearnClassifier, RDBLearnRegressor
 # ============================================================================
 
 # LimiX root path - adjust as needed
-LIMIX_ROOT = Path("/root/yl_project/LimiX")
+LIMIX_ROOT = Path(__file__).resolve().parent.parent / "LimiX"
 
 
 class CustomTabPFN:
