@@ -83,29 +83,8 @@ class TestTemporalDiffTransformer(unittest.TestCase):
         # We pass cutoff_time_col='cutoff_time'
         transformer = TemporalDiffTransformer(config, cutoff_time_col='cutoff_time')
 
-        # Create data with epochtime column (nanoseconds)
-        one_day_ns = int(1e9 * 86400)
-        df = pd.DataFrame({
-            'tx_epochtime': [one_day_ns, 2 * one_day_ns],  # Day 1, Day 2
-            'other_col': [10, 20],
-            'cutoff_time': pd.to_datetime(['2023-01-04', '2023-01-05']) # Day 4, Day 5 (approx relative to epoch)
-        })
-        
-        # Setup specific values to test math exactly
-        # epoch is 1970-01-01. 
-        # day 1 ns = 86400 * 1e9.
-        # cutoff day 4 = roughly 3 days diff? 
-        # Let's just use raw integers for validation logic if possible, 
-        # but the transformer uses astype('datetime64[ns]'). 
-        # So we should provide datetime objects for cutoff.
-        
-        # Let's adjust input to be compatible with logic:
-        # cutoff_nano = (cutoff_time - 0).astype(int64)
-        # time_diff = cutoff_nano - timestamp_nano
-        
         # Let's force timestamps to be relative to the provided cutoff dates
         t0 = pd.Timestamp('2023-01-01')
-        t1 = pd.Timestamp('2023-01-02')
         cutoff_0 = pd.Timestamp('2023-01-03') # diff = 2 days
         
         t2 = pd.Timestamp('2023-01-10')
