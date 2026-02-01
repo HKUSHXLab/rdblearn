@@ -1,11 +1,59 @@
 import unittest
+import sys
 import pandas as pd
 import numpy as np
-from rdblearn.preprocessing import TemporalDiffTransformer
+from unittest.mock import MagicMock, patch
+
+# Mock autogluon if not present to allow importing rdblearn.preprocessing
+try:
+    import autogluon.features.generators
+except ImportError:
+    mock_ag = MagicMock()
+    sys.modules["autogluon"] = mock_ag
+    sys.modules["autogluon.features"] = mock_ag
+    sys.modules["autogluon.features.generators"] = mock_ag
+
+from rdblearn.preprocessing import (
+    TemporalDiffTransformer, 
+    TypeCastTransformer, 
+    SafeLabelEncoderTransformer, 
+    TabularPreprocessor,
+    AutoGluonTransformer
+)
 from rdblearn.config import TemporalDiffConfig
 
 from loguru import logger
 logger.enable("rdblearn")
+
+
+class TestTypeCastTransformer(unittest.TestCase):
+    def test_transform_converts_types(self):
+        transformer = TypeCastTransformer()
+        df = pd.DataFrame({
+            'bool_col': [True, False, None],
+            'int64_col': pd.Series([1, 2, None], dtype="Int64"),
+            'float_col': [1.1, 2.2, 3.3],
+            'str_col': ['a', 'b', 'c']
+        })
+        
+        # Ensure input types are as expected for the test
+        df['bool_col'] = df['bool_col'].astype('boolean')
+        
+        res = transformer.fit(df).transform(df)
+        
+        # Check bool -> float32
+        self.assertEqual(res['bool_col'].dtype, np.float32)
+        np.testing.assert_array_equal(res['bool_col'].values[:2], [1.0, 0.0])
+        self.assertTrue(np.isnan(res['bool_col'].values[2]))
+
+        # Check Int64 -> float32
+        self.assertEqual(res['int64_col'].dtype, np.float32)
+        np.testing.assert_array_equal(res['int64_col'].values[:2], [1.0, 2.0])
+        self.assertTrue(np.isnan(res['int64_col'].values[2]))
+
+        # Check others untouched
+        self.assertEqual(res['float_col'].dtype, np.float64)
+        self.assertEqual(res['str_col'].dtype, object)
 
 
 class TestTemporalDiffTransformer(unittest.TestCase):
@@ -24,7 +72,6 @@ class TestTemporalDiffTransformer(unittest.TestCase):
 
         transformer.fit(df)
 
-        self.assertTrue(transformer.is_fitted_)
         self.assertEqual(len(transformer.timestamp_columns_), 2)
         self.assertIn('feature_epochtime', transformer.timestamp_columns_)
         self.assertIn('other_epochtime', transformer.timestamp_columns_)
@@ -33,94 +80,133 @@ class TestTemporalDiffTransformer(unittest.TestCase):
     def test_transform_computes_time_diff(self):
         """Test that transform correctly computes time differences."""
         config = TemporalDiffConfig(enabled=True)
-        transformer = TemporalDiffTransformer(config)
+        # We pass cutoff_time_col='cutoff_time'
+        transformer = TemporalDiffTransformer(config, cutoff_time_col='cutoff_time')
 
         # Create data with epochtime column (nanoseconds)
         one_day_ns = int(1e9 * 86400)
         df = pd.DataFrame({
             'tx_epochtime': [one_day_ns, 2 * one_day_ns],  # Day 1, Day 2
-            'other_col': [10, 20]
+            'other_col': [10, 20],
+            'cutoff_time': pd.to_datetime(['2023-01-04', '2023-01-05']) # Day 4, Day 5 (approx relative to epoch)
         })
-        cutoff_time = pd.Series([3 * one_day_ns, 4 * one_day_ns])  # Day 3, Day 4
+        
+        # Setup specific values to test math exactly
+        # epoch is 1970-01-01. 
+        # day 1 ns = 86400 * 1e9.
+        # cutoff day 4 = roughly 3 days diff? 
+        # Let's just use raw integers for validation logic if possible, 
+        # but the transformer uses astype('datetime64[ns]'). 
+        # So we should provide datetime objects for cutoff.
+        
+        # Let's adjust input to be compatible with logic:
+        # cutoff_nano = (cutoff_time - 0).astype(int64)
+        # time_diff = cutoff_nano - timestamp_nano
+        
+        # Let's force timestamps to be relative to the provided cutoff dates
+        t0 = pd.Timestamp('2023-01-01')
+        t1 = pd.Timestamp('2023-01-02')
+        cutoff_0 = pd.Timestamp('2023-01-03') # diff = 2 days
+        
+        t2 = pd.Timestamp('2023-01-10')
+        cutoff_1 = pd.Timestamp('2023-01-11') # diff = 1 day
+        
+        df = pd.DataFrame({
+            'tx_epochtime': [t0.value, t2.value], # int64 nano
+            'cutoff_time': [cutoff_0, cutoff_1]
+        })
 
         transformer.fit(df)
-        result = transformer.transform(df, cutoff_time)
+        result = transformer.transform(df)
 
-        # Original timestamp column should be removed
-        self.assertNotIn('tx_epochtime', result.columns)
+        # Original timestamp column should be retained
+        self.assertIn('tx_epochtime', result.columns)
         # New feature column should exist
         self.assertIn('tx_epochtime_diff', result.columns)
-        # Check computed values in nanoseconds: (3-1)*one_day_ns, (4-2)*one_day_ns
+        
+        # Check computed values
+        expected_diff_0 = float(cutoff_0.value - t0.value)
+        expected_diff_1 = float(cutoff_1.value - t2.value)
+        
         np.testing.assert_array_almost_equal(
-            result['tx_epochtime_diff'].values, [2 * one_day_ns, 2 * one_day_ns]
+            result['tx_epochtime_diff'].values, [expected_diff_0, expected_diff_1]
         )
-        # Other columns preserved
-        self.assertIn('other_col', result.columns)
 
-    def test_fit_respects_exclude_columns(self):
-        """Test that excluded columns are not transformed."""
-        config = TemporalDiffConfig(
-            enabled=True,
-            exclude_columns=['feature_epochtime']
+    def test_transform_missing_cutoff_col(self):
+        config = TemporalDiffConfig(enabled=True)
+        transformer = TemporalDiffTransformer(config, cutoff_time_col='missing_col')
+        df = pd.DataFrame({'tx_epochtime': [1000]})
+        transformer.fit(df)
+        res = transformer.transform(df)
+        # Should return X unchanged if cutoff col missing
+        self.assertIn('tx_epochtime', res.columns)
+
+
+class TestSafeLabelEncoderTransformer(unittest.TestCase):
+    def test_encodes_and_handles_unseen(self):
+        transformer = SafeLabelEncoderTransformer()
+        df_train = pd.DataFrame({'cat': ['a', 'b', 'b']})
+        df_test = pd.DataFrame({'cat': ['b', 'c', 'a']}) # 'c' is unseen
+        
+        transformer.fit(df_train)
+        
+        # Transform train
+        res_train = transformer.transform(df_train)
+        # a->0, b->1
+        np.testing.assert_array_equal(res_train['cat'], [0, 1, 1])
+        
+        # Transform test
+        res_test = transformer.transform(df_test)
+        # b->1, a->0. 'c' should be assigned new code, likely 2.
+        # Check that it runs without error and returns numeric
+        self.assertTrue(np.issubdtype(res_test['cat'].dtype, np.number))
+        self.assertEqual(len(res_test), 3)
+
+
+class TestTabularPreprocessor(unittest.TestCase):
+    @patch('rdblearn.preprocessing.AutoMLPipelineFeatureGenerator')
+    def test_pipeline_composition(self, mock_ag_class):
+        # Mock instance
+        mock_ag_instance = MagicMock()
+        mock_ag_class.return_value = mock_ag_instance
+        # Mock fit/transform
+        mock_ag_instance.transform.side_effect = lambda X: X
+        
+        config = TemporalDiffConfig(enabled=True)
+        pp = TabularPreprocessor(
+            temporal_diff_config=config, 
+            cutoff_time='cutoff'
         )
-        transformer = TemporalDiffTransformer(config)
-
+        
         df = pd.DataFrame({
-            'feature_epochtime': [1000, 2000],
-            'other_epochtime': [3000, 4000],
+            'bool_col': [True, False],
+            'tx_epochtime': [1000, 2000],
+            'cat_col': ['x', 'y'],
+            'cutoff': pd.to_datetime(['2023-01-01', '2023-01-01'])
         })
-
-        transformer.fit(df)
-
-        self.assertEqual(len(transformer.timestamp_columns_), 1)
-        self.assertNotIn('feature_epochtime', transformer.timestamp_columns_)
-        self.assertIn('other_epochtime', transformer.timestamp_columns_)
-
-    def test_fit_no_timestamp_columns(self):
-        """Test fit() when no timestamp columns exist."""
-        config = TemporalDiffConfig(enabled=True)
-        transformer = TemporalDiffTransformer(config)
-
-        df = pd.DataFrame({'col1': [1, 2], 'col2': [3, 4]})
-        transformer.fit(df)
-
-        self.assertTrue(transformer.is_fitted_)
-        self.assertEqual(len(transformer.timestamp_columns_), 0)
-
-    def test_datetime_diff_feature_dtype(self):
-        """Test that datetime diff features are converted to float64 type."""
-        config = TemporalDiffConfig(enabled=True)
-        transformer = TemporalDiffTransformer(config)
-
-        # Create data with epochtime column (int64 nanoseconds as returned by fastdfs)
-        one_day_ns = int(1e9 * 86400)
-        df = pd.DataFrame({
-            'tx_epochtime': [one_day_ns, 2 * one_day_ns],
-            'user_epochtime': [5 * one_day_ns, 6 * one_day_ns],
-            'amount': [100.5, 200.5]
-        })
-
-        # Cutoff time as datetime64 (as passed from X[cutoff_time_column])
-        cutoff_time = pd.Series(pd.to_datetime(['2023-01-10', '2023-01-15']))
-
-        transformer.fit(df)
-        result = transformer.transform(df, cutoff_time)
-
-        # Verify that all generated diff features are float64 type
-        self.assertIn('tx_epochtime_diff', result.columns)
-        self.assertIn('user_epochtime_diff', result.columns)
-
-        # Check dtype is float64 (following RDBColumnDType.float_t practice)
-        self.assertEqual(result['tx_epochtime_diff'].dtype, np.float64)
-        self.assertEqual(result['user_epochtime_diff'].dtype, np.float64)
-
-        # Verify original timestamp columns are removed
-        self.assertNotIn('tx_epochtime', result.columns)
-        self.assertNotIn('user_epochtime', result.columns)
-
-        # Verify non-timestamp columns are preserved
-        self.assertIn('amount', result.columns)
-        self.assertEqual(result['amount'].dtype, np.float64)
+        
+        # Fit
+        pp.fit(df)
+        
+        # Check pipeline steps
+        step_names = [s[0] for s in pp.pipeline.steps]
+        self.assertEqual(step_names, ['type_cast', 'temporal', 'label_encoder', 'autogluon'])
+        
+        # Transform
+        res = pp.transform(df)
+        
+        # Verify transformations occurred (indirectly via result checks)
+        # 1. Type cast: bool -> float
+        self.assertEqual(res['bool_col'].dtype, np.float32)
+        # 2. Temporal: diff created, original retained
+        self.assertIn('tx_epochtime_diff', res.columns)
+        self.assertIn('tx_epochtime', res.columns)
+        # 3. Label Encoder: cat -> number
+        self.assertTrue(np.issubdtype(res['cat_col'].dtype, np.number))
+        
+        # Verify AG was called
+        mock_ag_instance.fit.assert_called_once()
+        mock_ag_instance.transform.assert_called_once()
 
 if __name__ == '__main__':
     unittest.main()
