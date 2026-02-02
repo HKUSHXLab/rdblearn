@@ -5,6 +5,7 @@ from loguru import logger
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 import fastdfs
 from fastdfs import RDB, DFSConfig
+from fastdfs.utils.type_utils import safe_convert_to_string
 from fastdfs.transform import (
     RDBTransformWrapper, RDBTransformPipeline, HandleDummyTable, 
     FeaturizeDatetime, FillMissingPrimaryKey, 
@@ -44,10 +45,11 @@ class RDBLearnEstimator(BaseEstimator):
         self.train_cutoff_time_column_ = None
 
     def _ensure_keys_are_strings(self, X: pd.DataFrame, key_mappings: Dict[str, str]) -> None:
-        """Modifies X in place."""
+        """Modifies X in place, using safe_convert_to_string for consistency with RDB."""
         for col in key_mappings.keys():
             if col in X.columns:
-                X[col] = X[col].astype(str)
+                X[col] = safe_convert_to_string(X[col])
+
 
     def _downsample(
         self,
