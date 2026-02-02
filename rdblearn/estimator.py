@@ -22,7 +22,7 @@ class RDBLearnEstimator(BaseEstimator):
         config: Optional[Union[RDBLearnConfig, dict]] = None
     ):
         self.base_estimator = base_estimator
-        
+
         if isinstance(config, RDBLearnConfig):
             self.config = config
         else:

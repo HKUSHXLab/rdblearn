@@ -1,18 +1,43 @@
-from typing import Optional, Dict, Any, List, Set, Tuple
+from typing import Optional, Dict, Any, List
 import pandas as pd
 import numpy as np
-import warnings
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import LabelEncoder
+from sklearn.pipeline import Pipeline
 from autogluon.features.generators import AutoMLPipelineFeatureGenerator
 from loguru import logger
 from .config import TemporalDiffConfig
 
 
-class TemporalDiffTransformer:
-    def __init__(self, config: TemporalDiffConfig):
+class TypeCastTransformer(BaseEstimator, TransformerMixin):
+    """
+    Transformer to cast boolean and nullable Int64 columns to float32.
+    Handles <NA> values by converting them to np.nan.
+    """
+    def fit(self, X: pd.DataFrame, y=None):
+        self.is_fitted_ = True
+        return self
+
+    def transform(self, X: pd.DataFrame):
+        X = X.copy()
+        for col in X.columns:
+            # Check for boolean types
+            is_bool = pd.api.types.is_bool_dtype(X[col])
+            # Check for nullable Int64 (often comes from mixed sources)
+            is_nullable_int = str(X[col].dtype) == 'Int64'
+
+            if is_bool or is_nullable_int:
+                # astype('float32') handles mapping <NA>/None/False->0/True->1 correctly
+                # and converts <NA> to IEEE 754 NaN
+                X[col] = X[col].astype('float32')
+        return X
+
+
+class TemporalDiffTransformer(BaseEstimator, TransformerMixin):
+    def __init__(self, config: TemporalDiffConfig, cutoff_time_col: Optional[str] = None):
         self.config = config
+        self.cutoff_time_col = cutoff_time_col
         self.timestamp_columns_: List[str] = []
-        self.is_fitted_ = False
 
     def _sanitize_column_name(self, col: str) -> str:
         sanitized = col.replace('(', '_').replace(')', '').replace('.', '_')
@@ -21,105 +46,167 @@ class TemporalDiffTransformer:
         sanitized = sanitized.strip('_')
         return sanitized
 
-    def fit(self, X_dfs: pd.DataFrame) -> 'TemporalDiffTransformer':
+    def fit(self, X: pd.DataFrame, y=None):
         self.timestamp_columns_ = [
-            col for col in X_dfs.columns
+            col for col in X.columns
             if '_epochtime' in col and col not in self.config.exclude_columns
         ]
         if self.timestamp_columns_:
             logger.info(f"TemporalDiffTransformer: Found {len(self.timestamp_columns_)} timestamp columns for transformation.")
         else:
             logger.info("TemporalDiffTransformer: No timestamp columns detected.")
-        self.is_fitted_ = True
         return self
 
-    def transform(self, X_dfs: pd.DataFrame, cutoff_time: pd.Series) -> pd.DataFrame:
-        if not self.is_fitted_ or not self.timestamp_columns_:
-            return X_dfs
+    def transform(self, X: pd.DataFrame):
+        X = X.copy()
+        if not self.timestamp_columns_:
+            return X
 
-        result = X_dfs.copy()
-        cutoff_nano = (cutoff_time.astype('datetime64[ns]') - np.array(0).astype('datetime64[ns]')).astype('int64')
+        # We need the cutoff column to exist in X to compute diffs
+        if self.cutoff_time_col is None or self.cutoff_time_col not in X.columns:
+            # If cutoff time is missing, we can't compute diffs. 
+            # We assume X should pass through or user should have provided the col.
+            return X
+
+        cutoff_series = X[self.cutoff_time_col]
+        
+        # Convert cutoff to nanoseconds int64 for arithmetic
+        # This robustness handles mix of datetime objects and strings if properly castable
+        cutoff_nano = (cutoff_series.astype('datetime64[ns]') - np.array(0).astype('datetime64[ns]')).astype('int64')
 
         for col in self.timestamp_columns_:
-            if col not in result.columns:
+            if col not in X.columns:
                 continue
 
             # Timestamp columns already converted to int64 nanoseconds by fastdfs
-            timestamp_nano = result[col].values
+            timestamp_nano = X[col].values
 
-            # Calculate time difference and convert to float (following RDBColumnDType.float_t practice)
+            # Calculate time difference and convert to float
             time_diff = (cutoff_nano - timestamp_nano).astype('float64')
 
             sanitized_name = self._sanitize_column_name(col)
             feature_name = f"{sanitized_name}_diff"
 
-            result[feature_name] = time_diff
-            result = result.drop(columns=[col])
+            X[feature_name] = time_diff
 
+        # Optionally drop the cutoff time column if it helps downstream
+        # but usually we keep it unless explicitly told to drop.
         logger.info(f"TemporalDiffTransformer: Generated {len(self.timestamp_columns_)} temporal difference features.")
-        return result
+        return X
 
-class TabularPreprocessor:
-    def __init__(self, ag_config: Optional[Dict[str, Any]] = None, temporal_diff_config: Optional[TemporalDiffConfig] = None, cutoff_time: Optional[str] = None):
-        self.ag_config = ag_config or {}
-        self.temporal_diff_config = temporal_diff_config
-        self.cutoff_time = cutoff_time
-        self.label_encoders = {}
-        self.feature_generator = None
-        self.temporal_transformer = None
-        if self.temporal_diff_config and self.temporal_diff_config.enabled:
-            self.temporal_transformer = TemporalDiffTransformer(self.temporal_diff_config)
 
-    def fit(self, X: pd.DataFrame):
-        """Fit the preprocessor on training data."""
-        X_numeric = X.copy()
+class SafeLabelEncoderTransformer(BaseEstimator, TransformerMixin):
+    """
+    Wraps standard LabelEncoder logic but handles unseen labels dynamically by expanding classes,
+    matching original implementation behavior.
+    """
+    def __init__(self):
+        self.label_encoders_ = {}
+        self.cat_columns_ = []
 
-        # 1. Fit temporal features if enabled
-        if self.temporal_transformer:
-            self.temporal_transformer.fit(X_numeric)
-        
-        # 2. Fit LabelEncoders
-        cat_columns = X_numeric.select_dtypes(include=['object', 'category']).columns.tolist()
-        for col in cat_columns:
+    def fit(self, X: pd.DataFrame, y=None):
+        # Identify object/category columns
+        self.cat_columns_ = X.select_dtypes(include=['object', 'category']).columns.tolist()
+        for col in self.cat_columns_:
             le = LabelEncoder()
-            X_numeric[col] = le.fit_transform(X_numeric[col].astype(str))
-            self.label_encoders[col] = le
-            
-        # 3. Fit AutoGluon Feature Generator
-        default_ag_config = {
+            # Convert to string to handle mixed types/NaNs consistently
+            le.fit(X[col].astype(str))
+            self.label_encoders_[col] = le
+        return self
+
+    def transform(self, X: pd.DataFrame):
+        X = X.copy()
+        for col in self.cat_columns_:
+            if col in X.columns:
+                le = self.label_encoders_[col]
+                vals = X[col].astype(str)
+                
+                # Check for unseen labels and expand if necessary
+                unseen_mask = ~vals.isin(le.classes_)
+                if unseen_mask.any():
+                    # Extend classes with new unseen labels
+                    new_classes = vals[unseen_mask].unique()
+                    le.classes_ = np.concatenate([le.classes_, new_classes])
+                    # Re-sort if strictly necessary for LabelEncoder, but usually unnecessary for just transform mapping
+                    le.classes_ = np.sort(le.classes_)
+                
+                X[col] = le.transform(vals)
+        return X
+
+
+class AutoGluonTransformer(BaseEstimator, TransformerMixin):
+    """
+    Scikit-learn wrapper for AutoGluon's AutoMLPipelineFeatureGenerator.
+    """
+    def __init__(self, ag_config: Optional[Dict[str, Any]] = None):
+        self.ag_config = ag_config
+        self.feature_generator_ = None
+        
+        self._default_ag_config = {
             "enable_datetime_features": True,
             "enable_raw_text_features": False,
             "enable_text_special_features": False,
             "enable_text_ngram_features": False,
         }
         if self.ag_config:
-            default_ag_config.update(self.ag_config)
-            
-        self.feature_generator = AutoMLPipelineFeatureGenerator(**default_ag_config)
-        self.feature_generator.fit(X=X_numeric)
+            self._default_ag_config.update(self.ag_config)
+
+    def fit(self, X: pd.DataFrame, y=None):
+        self.feature_generator_ = AutoMLPipelineFeatureGenerator(**self._default_ag_config)
+        # AutoGluon generator fits and needs the data
+        self.feature_generator_.fit(X=X)
+        return self
+
+    def transform(self, X: pd.DataFrame):
+        if self.feature_generator_ is None:
+            raise RuntimeError("AutoGluonTransformer not fitted.")
+        return self.feature_generator_.transform(X)
+
+
+class TabularPreprocessor(BaseEstimator, TransformerMixin):
+    def __init__(
+        self, 
+        ag_config: Optional[Dict[str, Any]] = None,
+        temporal_diff_config: Optional[TemporalDiffConfig] = None,
+        cutoff_time: Optional[str] = None
+    ):
+        self.ag_config = ag_config
+        self.temporal_diff_config = temporal_diff_config
+        self.cutoff_time = cutoff_time
+        self.pipeline = None
+        self.is_fitted_ = False
+
+    def fit(self, X: pd.DataFrame, y=None):
+        """Fit the preprocessor pipeline on training data."""
+        steps = []
+
+        # 1. Type Casting (Must be first to fix legacy types)
+        steps.append(('type_cast', TypeCastTransformer()))
+
+        # 2. Temporal Features
+        if self.temporal_diff_config and self.temporal_diff_config.enabled:
+            # We pass the column name for cutoff time so the transformer can find it in X
+            steps.append(('temporal', TemporalDiffTransformer(
+                config=self.temporal_diff_config, 
+                cutoff_time_col=self.cutoff_time
+            )))
+        
+        # 3. Categorical Encoding
+        steps.append(('label_encoder', SafeLabelEncoderTransformer()))
+
+        # 4. AutoGluon Features
+        steps.append(('autogluon', AutoGluonTransformer(ag_config=self.ag_config)))
+
+        self.pipeline = Pipeline(steps)
+        logger.debug(f"Preprocessor pipeline: {self.pipeline}")
+
+        self.pipeline.fit(X, y)
+        self.is_fitted_ = True
         return self
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Transform features."""
-        if self.feature_generator is None:
+        """Transform features using the fitted pipeline."""
+        if self.pipeline is None:
             raise RuntimeError("Preprocessor not fitted.")
-
-        X_numeric = X.copy()
-
-        # 1. Apply temporal difference transformation
-        if self.temporal_transformer and self.cutoff_time is not None:
-            cutoff_time = X_numeric[self.cutoff_time]
-            X_numeric = self.temporal_transformer.transform(X_numeric, cutoff_time)
         
-        # 2. Apply LabelEncoders
-        for col, le in self.label_encoders.items():
-            if col in X_numeric.columns:
-                vals = X_numeric[col].astype(str)
-                unseen_mask = ~vals.isin(le.classes_)
-                if unseen_mask.any():
-                    le.classes_ = np.append(le.classes_, vals[unseen_mask].unique())
-                
-                X_numeric[col] = le.transform(vals)
-        
-        # 3. Apply AutoGluon Feature Generator
-        return self.feature_generator.transform(X_numeric)
+        return self.pipeline.transform(X)
