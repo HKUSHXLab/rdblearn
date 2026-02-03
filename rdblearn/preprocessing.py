@@ -51,6 +51,12 @@ class TemporalDiffTransformer(BaseEstimator, TransformerMixin):
             col for col in X.columns
             if '_epochtime' in col and col not in self.config.exclude_columns
         ]
+        # only maintain the "max", "min" and "median" columns if specified
+        self.timestamp_columns_ = [
+            col for col in self.timestamp_columns_
+            if any(suffix in col.lower() for suffix in ['max', 'min', 'median'])
+        ]
+
         if self.timestamp_columns_:
             logger.info(f"TemporalDiffTransformer: Found {len(self.timestamp_columns_)} timestamp columns for transformation.")
         else:
@@ -88,6 +94,7 @@ class TemporalDiffTransformer(BaseEstimator, TransformerMixin):
             feature_name = f"{sanitized_name}_diff"
 
             X[feature_name] = time_diff
+            X=X.drop(columns=[col])
 
         # Optionally drop the cutoff time column if it helps downstream
         # but usually we keep it unless explicitly told to drop.
