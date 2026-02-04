@@ -79,12 +79,8 @@ parameters:
   # Temporal difference feature transformation config
   # Maps to TemporalDiffConfig in rdblearn/config.py
   temporal_diff:
-    parameters:
-      enabled:
-        value: true
-      exclude_columns:
-        value: []
-
+    value:
+      enabled: true
 # Optional: Early termination for failing runs
 # early_terminate:
 #   type: hyperband
