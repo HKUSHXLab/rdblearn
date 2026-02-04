@@ -477,6 +477,7 @@ def main(engine_path: str):
     use_dfs = config.get("use_dfs", True)
     max_train_samples = config.get("max_train_samples", 10000)
     dfs_max_depth = config.get("dfs_max_depth", 2)
+    temporal_diff = config.get("temporal_diff", None)
     
     # Split data pair: "adapter_type::dataset_name::task_name"
     # For relbench: "relbench::rel-f1::driver-dnf"
@@ -547,7 +548,10 @@ def main(engine_path: str):
     
     if use_dfs:
         rdblearn_config["dfs"] = {"max_depth": dfs_max_depth, "engine_path": engine_path}
-    
+
+    if temporal_diff is not None:
+        rdblearn_config["temporal_diff"] = dict(temporal_diff)
+
     clf = EstimatorClass(
         base_estimator=base_estimator,
         config=rdblearn_config,

@@ -47,57 +47,62 @@ class TemporalDiffTransformer(BaseEstimator, TransformerMixin):
         return sanitized
 
     def fit(self, X: pd.DataFrame, y=None):
-        self.timestamp_columns_ = [
+        # Find all epochtime columns
+        all_epochtime_cols = [
             col for col in X.columns
             if '_epochtime' in col and col not in self.config.exclude_columns
         ]
-        # only maintain the "max", "min" and "median" columns if specified
+        
+        # Columns to transform (only max, min, median, mean)
         self.timestamp_columns_ = [
-            col for col in self.timestamp_columns_
-            if any(suffix in col.lower() for suffix in ['max', 'min', 'median'])
+            col for col in all_epochtime_cols
+            if any(suffix in col.lower() for suffix in ['max', 'min', 'median', 'mean'])
+        ]
+        
+        # Columns to drop (all other epochtime columns)
+        self.columns_to_drop_ = [
+            col for col in all_epochtime_cols
+            if col not in self.timestamp_columns_
         ]
 
         if self.timestamp_columns_:
             logger.info(f"TemporalDiffTransformer: Found {len(self.timestamp_columns_)} timestamp columns for transformation.")
-        else:
-            logger.info("TemporalDiffTransformer: No timestamp columns detected.")
+        if self.columns_to_drop_:
+            logger.info(f"TemporalDiffTransformer: Will drop {len(self.columns_to_drop_)} epochtime columns (STD, VAR, etc.).")
+        
         return self
 
     def transform(self, X: pd.DataFrame):
         X = X.copy()
+        
+        # Drop unwanted epochtime columns first
+        if self.columns_to_drop_:
+            cols_present = [col for col in self.columns_to_drop_ if col in X.columns]
+            if cols_present:
+                X = X.drop(columns=cols_present)
+        
         if not self.timestamp_columns_:
             return X
 
-        # We need the cutoff column to exist in X to compute diffs
         if self.cutoff_time_col is None or self.cutoff_time_col not in X.columns:
-            # If cutoff time is missing, we can't compute diffs. 
-            # We assume X should pass through or user should have provided the col.
             return X
 
         cutoff_series = X[self.cutoff_time_col]
-        
-        # Convert cutoff to nanoseconds int64 for arithmetic
-        # This robustness handles mix of datetime objects and strings if properly castable
         cutoff_nano = (cutoff_series.astype('datetime64[ns]') - np.array(0).astype('datetime64[ns]')).astype('int64')
 
         for col in self.timestamp_columns_:
             if col not in X.columns:
                 continue
 
-            # Timestamp columns already converted to int64 nanoseconds by fastdfs
             timestamp_nano = X[col].values
-
-            # Calculate time difference and convert to float
             time_diff = (cutoff_nano - timestamp_nano).astype('float64')
 
             sanitized_name = self._sanitize_column_name(col)
             feature_name = f"{sanitized_name}_diff"
 
             X[feature_name] = time_diff
-            X=X.drop(columns=[col])
+            X = X.drop(columns=[col])
 
-        # Optionally drop the cutoff time column if it helps downstream
-        # but usually we keep it unless explicitly told to drop.
         logger.info(f"TemporalDiffTransformer: Generated {len(self.timestamp_columns_)} temporal difference features.")
         return X
 
