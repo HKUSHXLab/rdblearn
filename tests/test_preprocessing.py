@@ -60,65 +60,100 @@ class TestTemporalDiffTransformer(unittest.TestCase):
     """Tests for TemporalDiffTransformer class."""
 
     def test_fit_detects_epochtime_columns(self):
-        """Test that fit() correctly identifies columns containing '_epochtime'."""
+        """Test that fit() correctly identifies epochtime columns with max/min/median/mean suffixes."""
         config = TemporalDiffConfig(enabled=True)
         transformer = TemporalDiffTransformer(config)
 
         df = pd.DataFrame({
-            'feature_epochtime': [1000, 2000],
-            'other_epochtime': [3000, 4000],
+            'feature_epochtime_max': [1000, 2000],
+            'feature_epochtime_min': [500, 1500],
+            'feature_epochtime_std': [100, 200],
             'regular_col': [1, 2]
         })
 
         transformer.fit(df)
 
+        # Only max and min should be in timestamp_columns_ (for transformation)
         self.assertEqual(len(transformer.timestamp_columns_), 2)
-        self.assertIn('feature_epochtime', transformer.timestamp_columns_)
-        self.assertIn('other_epochtime', transformer.timestamp_columns_)
+        self.assertIn('feature_epochtime_max', transformer.timestamp_columns_)
+        self.assertIn('feature_epochtime_min', transformer.timestamp_columns_)
+        # std should be in columns_to_drop_
+        self.assertIn('feature_epochtime_std', transformer.columns_to_drop_)
+        # regular_col should be in neither
         self.assertNotIn('regular_col', transformer.timestamp_columns_)
+        self.assertNotIn('regular_col', transformer.columns_to_drop_)
+
+    def test_fit_detects_all_suffix_variants(self):
+        """Test that fit() picks up max, min, median, and mean suffixes."""
+        config = TemporalDiffConfig(enabled=True)
+        transformer = TemporalDiffTransformer(config)
+
+        df = pd.DataFrame({
+            'ts_epochtime_max': [1000],
+            'ts_epochtime_min': [500],
+            'ts_epochtime_median': [750],
+            'ts_epochtime_mean': [700],
+            'ts_epochtime_var': [50],
+            'ts_epochtime_std': [10],
+        })
+
+        transformer.fit(df)
+
+        self.assertEqual(len(transformer.timestamp_columns_), 4)
+        self.assertEqual(len(transformer.columns_to_drop_), 2)
+        self.assertIn('ts_epochtime_var', transformer.columns_to_drop_)
+        self.assertIn('ts_epochtime_std', transformer.columns_to_drop_)
 
     def test_transform_computes_time_diff(self):
-        """Test that transform correctly computes time differences."""
+        """Test that transform correctly computes time differences and drops originals."""
         config = TemporalDiffConfig(enabled=True)
-        # We pass cutoff_time_col='cutoff_time'
         transformer = TemporalDiffTransformer(config, cutoff_time_col='cutoff_time')
 
-        # Let's force timestamps to be relative to the provided cutoff dates
         t0 = pd.Timestamp('2023-01-01')
         cutoff_0 = pd.Timestamp('2023-01-03') # diff = 2 days
-        
+
         t2 = pd.Timestamp('2023-01-10')
         cutoff_1 = pd.Timestamp('2023-01-11') # diff = 1 day
-        
+
         df = pd.DataFrame({
-            'tx_epochtime': [t0.value, t2.value], # int64 nano
+            'tx_epochtime_max': [t0.value, t2.value], # int64 nano
             'cutoff_time': [cutoff_0, cutoff_1]
         })
 
         transformer.fit(df)
         result = transformer.transform(df)
 
-        # Original timestamp column should be retained
-        self.assertIn('tx_epochtime', result.columns)
+        # Original timestamp column should be DROPPED after transformation
+        self.assertNotIn('tx_epochtime_max', result.columns)
         # New feature column should exist
-        self.assertIn('tx_epochtime_diff', result.columns)
-        
+        self.assertIn('tx_epochtime_max_diff', result.columns)
+
         # Check computed values
         expected_diff_0 = float(cutoff_0.value - t0.value)
         expected_diff_1 = float(cutoff_1.value - t2.value)
-        
+
         np.testing.assert_array_almost_equal(
-            result['tx_epochtime_diff'].values, [expected_diff_0, expected_diff_1]
+            result['tx_epochtime_max_diff'].values, [expected_diff_0, expected_diff_1]
         )
 
+
     def test_transform_missing_cutoff_col(self):
+        """Test that transform drops non-matching epochtime cols even without cutoff."""
         config = TemporalDiffConfig(enabled=True)
         transformer = TemporalDiffTransformer(config, cutoff_time_col='missing_col')
-        df = pd.DataFrame({'tx_epochtime': [1000]})
+        df = pd.DataFrame({
+            'tx_epochtime_max': [1000],
+            'tx_epochtime_std': [100],
+            'regular_col': [42],
+        })
         transformer.fit(df)
         res = transformer.transform(df)
-        # Should return X unchanged if cutoff col missing
-        self.assertIn('tx_epochtime', res.columns)
+        # Non-matching epochtime col should still be dropped
+        self.assertNotIn('tx_epochtime_std', res.columns)
+        # Matching epochtime col should remain (no diff computed since cutoff missing)
+        # but still present because cutoff is missing so transform returns early
+        self.assertIn('tx_epochtime_max', res.columns)
+        self.assertIn('regular_col', res.columns)
 
 
 class TestSafeLabelEncoderTransformer(unittest.TestCase):
@@ -157,29 +192,31 @@ class TestTabularPreprocessor(unittest.TestCase):
             cutoff_time='cutoff'
         )
         
+        t0 = pd.Timestamp('2023-01-01')
+        t1 = pd.Timestamp('2023-01-02')
         df = pd.DataFrame({
             'bool_col': [True, False],
-            'tx_epochtime': [1000, 2000],
+            'tx_epochtime_max': [t0.value, t1.value],
             'cat_col': ['x', 'y'],
-            'cutoff': pd.to_datetime(['2023-01-01', '2023-01-01'])
+            'cutoff': pd.to_datetime(['2023-01-03', '2023-01-04'])
         })
-        
+
         # Fit
         pp.fit(df)
-        
+
         # Check pipeline steps
         step_names = [s[0] for s in pp.pipeline.steps]
         self.assertEqual(step_names, ['type_cast', 'temporal', 'label_encoder', 'autogluon'])
-        
+
         # Transform
         res = pp.transform(df)
-        
+
         # Verify transformations occurred (indirectly via result checks)
         # 1. Type cast: bool -> float
         self.assertEqual(res['bool_col'].dtype, np.float32)
-        # 2. Temporal: diff created, original retained
-        self.assertIn('tx_epochtime_diff', res.columns)
-        self.assertIn('tx_epochtime', res.columns)
+        # 2. Temporal: diff created, original dropped
+        self.assertIn('tx_epochtime_max_diff', res.columns)
+        self.assertNotIn('tx_epochtime_max', res.columns)
         # 3. Label Encoder: cat -> number
         self.assertTrue(np.issubdtype(res['cat_col'].dtype, np.number))
         
