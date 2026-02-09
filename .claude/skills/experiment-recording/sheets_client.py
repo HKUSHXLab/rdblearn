@@ -53,10 +53,29 @@ class SheetsClient:
         """
         try:
             worksheet = self._spreadsheet.worksheet(sheet_name)
-            data = worksheet.get_all_records()
-            if not data:
+            all_values = worksheet.get_all_values()
+            if not all_values or len(all_values) < 2:
                 return pd.DataFrame()
-            return pd.DataFrame(data)
+            headers = all_values[0]
+            # Filter out columns with empty headers
+            valid_cols = [i for i, h in enumerate(headers) if h.strip()]
+            filtered_headers = [headers[i] for i in valid_cols]
+            filtered_rows = [[row[i] if i < len(row) else "" for i in valid_cols] for row in all_values[1:]]
+            df = pd.DataFrame(filtered_rows, columns=filtered_headers)
+            # Remove fully empty rows
+            df = df[df.apply(lambda r: any(str(v).strip() for v in r), axis=1)]
+            # Convert numeric columns from strings to numbers
+            for col in df.columns:
+                converted = pd.to_numeric(df[col], errors='coerce')
+                # Only apply conversion if at least some values converted successfully
+                if converted.notna().any():
+                    # Keep original strings where conversion failed (non-numeric columns)
+                    if converted.isna().all():
+                        continue
+                    # If most values are numeric, treat as numeric column
+                    if converted.notna().sum() > converted.isna().sum():
+                        df[col] = converted
+            return df
         except gspread.WorksheetNotFound:
             print(f"Sheet '{sheet_name}' not found")
             return pd.DataFrame()
@@ -66,21 +85,25 @@ class SheetsClient:
         sheet_name: str,
         comparison_df: pd.DataFrame,
         improvement_rate: float,
+        r2_target_df: Optional[pd.DataFrame] = None,
         detailed_df: Optional[pd.DataFrame] = None,
         sweep_id: Optional[str] = None
     ):
         """
-        Write comparison table to a new sheet, with optional detailed table below.
+        Write comparison table to a new sheet, with optional R² summary and detailed table below.
 
         Args:
             sheet_name: Name for the new worksheet
             comparison_df: DataFrame with comparison data
             improvement_rate: Improvement rate percentage
+            r2_target_df: Optional DataFrame with R²-based target table (regression tasks)
             detailed_df: Optional DataFrame with all runs (detailed table)
             sweep_id: Optional sweep ID for traceability
         """
         # Calculate total rows needed
         total_rows = len(comparison_df) + 10
+        if r2_target_df is not None and not r2_target_df.empty:
+            total_rows += len(r2_target_df) + 5
         if detailed_df is not None:
             total_rows += len(detailed_df) + 5
 
@@ -124,6 +147,30 @@ class SheetsClient:
         rows.append([])  # Empty row
         improvement_row = [""] * (len(headers) - 1) + [f"Improvement Rate: {improvement_rate:.1f}%"]
         rows.append(improvement_row)
+
+        # Add R² target table if provided (2 rows below improvement rate)
+        r2_start_row = None
+        if r2_target_df is not None and not r2_target_df.empty:
+            rows.append([])  # Empty row
+            rows.append([])  # Another empty row for spacing
+            rows.append(["R² SUMMARY TABLE (Best dev_r2 per Regression Task)"])  # Section header
+            r2_start_row = len(rows) + 1  # 1-indexed for sheets
+
+            # Add R² table headers
+            r2_headers = list(r2_target_df.columns)
+            rows.append(r2_headers)
+
+            # Add R² table data
+            for _, row in r2_target_df.iterrows():
+                row_values = []
+                for val in row:
+                    if pd.isna(val):
+                        row_values.append("")
+                    elif isinstance(val, float):
+                        row_values.append(round(val, 6))
+                    else:
+                        row_values.append(val)
+                rows.append(row_values)
 
         # Add sweep URL for traceability
         if sweep_id:
@@ -176,6 +223,22 @@ class SheetsClient:
             # Apply red for negative (degradation when direction is 'up')
             # Note: We need to check direction per row, so we apply formatting cell by cell
             self._apply_delta_formatting(worksheet, comparison_df, delta_col_idx)
+
+        # Format R² table header if present
+        if r2_start_row is not None and r2_target_df is not None:
+            r2_headers = list(r2_target_df.columns)
+            # Format section title
+            worksheet.format(f'A{r2_start_row - 1}', {
+                'textFormat': {'bold': True, 'fontSize': 12}
+            })
+            # Format R² table header row (green background for R² theme)
+            worksheet.format(
+                f'A{r2_start_row}:' + chr(ord('A') + len(r2_headers) - 1) + str(r2_start_row),
+                {
+                    'textFormat': {'bold': True},
+                    'backgroundColor': {'red': 0.56, 'green': 0.77, 'blue': 0.49}
+                }
+            )
 
         # Format detailed table header if present
         if detailed_start_row is not None and detailed_df is not None:

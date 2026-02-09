@@ -28,7 +28,7 @@ class WandBClient:
 
     def fetch_sweep_runs(self, sweep_id: str) -> pd.DataFrame:
         """
-        Fetch all finished runs from a WandB sweep.
+        Fetch all runs from a WandB sweep that have valid metrics.
 
         Args:
             sweep_id: The sweep ID to fetch runs from
@@ -47,10 +47,7 @@ class WandBClient:
 
         results = []
         for run in runs:
-            # Only process finished runs
-            if run.state != "finished":
-                continue
-
+            # Process all runs - filtering is done by metric availability in _process_run
             processed = self._process_run(run)
             if processed:
                 results.append(processed)
@@ -81,6 +78,7 @@ class WandBClient:
 
         # Skip incomplete runs
         if not all([adapter_type, dataset_name, task_name, model_name]):
+            print(f"Skipping incomplete run: {run.name}")
             return None
 
         # Get metric values based on task type
@@ -99,7 +97,8 @@ class WandBClient:
         if dev_metric is None or test_metric is None:
             return None
 
-        # Get test_r2 (optional, may not exist for all runs)
+        # Get R² metrics (optional, may not exist for all runs)
+        dev_r2 = summary.get('dev_metric/r2')
         test_r2 = summary.get('test_metric/r2')
 
         # Standardize names using mappings
@@ -127,11 +126,9 @@ class WandBClient:
             'test_metric': float(test_metric),
         }
 
-        # Add test_r2 if available
-        if test_r2 is not None:
-            result['test_r2'] = float(test_r2)
-        else:
-            result['test_r2'] = None
+        # Add R² metrics if available
+        result['dev_r2'] = float(dev_r2) if dev_r2 is not None else None
+        result['test_r2'] = float(test_r2) if test_r2 is not None else None
 
         return result
 

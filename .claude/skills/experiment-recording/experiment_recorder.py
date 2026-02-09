@@ -59,6 +59,66 @@ def create_target_table(detailed_df: pd.DataFrame) -> pd.DataFrame:
     return target_df
 
 
+def create_r2_target_table(detailed_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Create R²-based target table for regression tasks only.
+
+    Selects best config per (Dataset, Task) based on dev_r2 (highest R²).
+    Only includes regression tasks (Metric='MAE').
+
+    Args:
+        detailed_df: DataFrame with all runs
+
+    Returns:
+        DataFrame with columns: Dataset, Task, Metric, Direction, DFS_Depth,
+        model_name, dev_r2, test_r2
+    """
+    if detailed_df.empty:
+        return pd.DataFrame()
+
+    # Filter for regression tasks only (Metric='MAE' or Direction='down')
+    regression_df = detailed_df[detailed_df['Metric'] == 'MAE'].copy()
+
+    if regression_df.empty:
+        return pd.DataFrame()
+
+    # Filter out rows without dev_r2
+    regression_df = regression_df[regression_df['dev_r2'].notna()]
+
+    if regression_df.empty:
+        return pd.DataFrame()
+
+    target_rows = []
+
+    # Group by Dataset and Task
+    for (dataset, task), group in regression_df.groupby(['Dataset', 'Task']):
+        # For R², higher is better - pick max dev_r2
+        best_idx = group['dev_r2'].idxmax()
+        best_row = group.loc[best_idx].copy()
+        target_rows.append(best_row)
+
+    if not target_rows:
+        return pd.DataFrame()
+
+    target_df = pd.DataFrame(target_rows)
+
+    # Sort by Dataset, Task
+    target_df = target_df.sort_values(['Dataset', 'Task']).reset_index(drop=True)
+
+    # Update Metric and Direction for R² table
+    target_df['Metric'] = 'R²'
+    target_df['Direction'] = 'up'
+
+    # Select only the required columns
+    r2_columns = ['Dataset', 'Task', 'Metric', 'Direction', 'DFS_Depth',
+                  'model_name', 'dev_r2', 'test_r2']
+    # Only include columns that exist
+    final_columns = [col for col in r2_columns if col in target_df.columns]
+    target_df = target_df[final_columns]
+
+    return target_df
+
+
 def compute_comparison(
     experiment_target: pd.DataFrame,
     main_target: pd.DataFrame
@@ -192,6 +252,11 @@ def run_experiment_recording(
     experiment_target = create_target_table(experiment_detailed)
     print(f"  Target table has {len(experiment_target)} tasks")
 
+    # Step 3b: Create R²-based target table for regression tasks
+    print("\nStep 3b: Creating R²-based target table (regression tasks only)...")
+    r2_target = create_r2_target_table(experiment_detailed)
+    print(f"  R² target table has {len(r2_target)} regression tasks")
+
     # Step 4: Compute comparison
     print("\nStep 4: Computing comparison with main baseline...")
     comparison_df, improvement_rate = compute_comparison(experiment_target, main_target)
@@ -206,6 +271,7 @@ def run_experiment_recording(
         sheet_name,
         comparison_df,
         improvement_rate,
+        r2_target_df=r2_target,
         detailed_df=experiment_detailed,
         sweep_id=experiment_sweep_id
     )
