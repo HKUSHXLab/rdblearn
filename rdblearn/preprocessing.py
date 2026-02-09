@@ -53,22 +53,20 @@ class TemporalDiffTransformer(BaseEstimator, TransformerMixin):
             if '_epochtime' in col and col not in self.config.exclude_columns
         ]
         
-        # Columns to transform (only max, min, median, mean)
-        self.timestamp_columns_ = [
-            col for col in all_epochtime_cols
-            if any(suffix in col.lower() for suffix in ['max', 'min', 'median', 'mean'])
-        ]
-        
-        # Columns to drop (all other epochtime columns)
+        # Drop epochtime columns containing 'std' — std of timestamps is meaningless.
         self.columns_to_drop_ = [
-            col for col in all_epochtime_cols
-            if col not in self.timestamp_columns_
+            col for col in all_epochtime_cols if 'std' in col.lower()
+        ]
+
+        # Transform all remaining epochtime columns
+        self.timestamp_columns_ = [
+            col for col in all_epochtime_cols if col not in self.columns_to_drop_
         ]
 
         if self.timestamp_columns_:
             logger.info(f"TemporalDiffTransformer: Found {len(self.timestamp_columns_)} timestamp columns for transformation.")
         if self.columns_to_drop_:
-            logger.info(f"TemporalDiffTransformer: Will drop {len(self.columns_to_drop_)} epochtime columns (STD, VAR, etc.).")
+            logger.info(f"TemporalDiffTransformer: Will drop {len(self.columns_to_drop_)} epochtime columns containing 'std'.")
         
         return self
 

@@ -84,7 +84,7 @@ class TestTemporalDiffTransformer(unittest.TestCase):
         self.assertNotIn('regular_col', transformer.columns_to_drop_)
 
     def test_fit_detects_all_suffix_variants(self):
-        """Test that fit() picks up max, min, median, and mean suffixes."""
+        """Test that fit() picks up max, min, median, and mean suffixes and drops std."""
         config = TemporalDiffConfig(enabled=True)
         transformer = TemporalDiffTransformer(config)
 
@@ -93,15 +93,13 @@ class TestTemporalDiffTransformer(unittest.TestCase):
             'ts_epochtime_min': [500],
             'ts_epochtime_median': [750],
             'ts_epochtime_mean': [700],
-            'ts_epochtime_var': [50],
             'ts_epochtime_std': [10],
         })
 
         transformer.fit(df)
 
         self.assertEqual(len(transformer.timestamp_columns_), 4)
-        self.assertEqual(len(transformer.columns_to_drop_), 2)
-        self.assertIn('ts_epochtime_var', transformer.columns_to_drop_)
+        self.assertEqual(len(transformer.columns_to_drop_), 1)
         self.assertIn('ts_epochtime_std', transformer.columns_to_drop_)
 
     def test_transform_computes_time_diff(self):
