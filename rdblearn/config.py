@@ -31,7 +31,7 @@ class RDBLearnConfig(BaseModel):
     predict_batch_size: int = 5000
 
     # Temporal Difference Configuration (post-DFS transformation)
-    temporal_diff: Optional[TemporalDiffConfig] = None
+    temporal_diff: Optional[TemporalDiffConfig] = TemporalDiffConfig()
 
     class Config:
         arbitrary_types_allowed = True

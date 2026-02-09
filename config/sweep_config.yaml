@@ -76,6 +76,11 @@ parameters:
       - 3
       - 4
 
+  # Temporal difference feature transformation config
+  # Maps to TemporalDiffConfig in rdblearn/config.py
+  temporal_diff:
+    value:
+      enabled: true
 # Optional: Early termination for failing runs
 # early_terminate:
 #   type: hyperband
