@@ -44,22 +44,30 @@ pip install -e .
 
 ## 🚀 Usage
 
-### Basic Example (RelBench rel-f1)
+### Basic Example (RelBench rel-avito)
+
+RDBLearn includes two features enabled by default that improve prediction quality:
+
+- **Target History Augmentation** (`enable_target_augmentation`): Injects the full training data (`X` and `y`) as a history table into the RDB before downsampling, allowing DFS to derive entity-level aggregate features from historical target values (e.g., mean past CTR per ad). Temporal cutoffs are respected to prevent data leakage. Requires `cutoff_time_column` to be provided.
+- **Temporal Difference Features** (`temporal_diff`): Converts absolute epoch-time columns produced by DFS into relative temporal differences from the cutoff time (i.e., `cutoff_time - epochtime`), so the model sees how recently events occurred rather than raw timestamps.
 
 ```python
 from rdblearn.datasets import RDBDataset
-from rdblearn.estimator import RDBLearnClassifier
-from tabpfn import TabPFNClassifier
+from rdblearn.estimator import RDBLearnRegressor
+from tabpfn import TabPFNRegressor
 
 # 1. Load RelBench dataset and task
-dataset = RDBDataset.from_relbench("rel-f1")
-task = dataset.tasks["driver-dnf"]
+dataset = RDBDataset.from_relbench("rel-avito")
+task = dataset.tasks["ad-ctr"]
 
 # 2. Initialize the estimator with a base model (e.g., TabPFN)
-clf = RDBLearnClassifier(
-    base_estimator=TabPFNClassifier(device="cpu"), # or "cuda"
+#    Both enable_target_augmentation and temporal_diff are enabled by default.
+reg = RDBLearnRegressor(
+    base_estimator=TabPFNRegressor(device="cpu"), # or "cuda"
     config={
         "dfs": {"max_depth": 2},
+        "enable_target_augmentation": True,
+        "temporal_diff": {"enabled": True},
         "max_train_samples": 1000
     }
 )
@@ -68,9 +76,9 @@ clf = RDBLearnClassifier(
 X_train = task.train_df.drop(columns=[task.metadata.target_col])
 y_train = task.train_df[task.metadata.target_col]
 
-clf.fit(
-    X=X_train, 
-    y=y_train, 
+reg.fit(
+    X=X_train,
+    y=y_train,
     rdb=dataset.rdb,
     key_mappings=task.metadata.key_mappings,
     cutoff_time_column=task.metadata.time_col
@@ -78,7 +86,7 @@ clf.fit(
 
 # 4. Predict
 X_test = task.test_df.drop(columns=[task.metadata.target_col])
-predictions = clf.predict(X=X_test)
+predictions = reg.predict(X=X_test)
 ```
 
 See `examples/` for more detailed usage.
@@ -100,7 +108,13 @@ Scikit-learn compatible estimators for relational learning.
 
 - **`__init__(base_estimator, config: Optional[dict] = None)`**:
     - `base_estimator`: A single-table estimator (e.g., `TabPFNClassifier`, `AutoGluonClassifier`).
-    - `config`: Optional dictionary to override default DFS or sampling settings.
+    - `config`: Optional dictionary to override default DFS or sampling settings. Key options:
+        - `dfs`: DFS configuration (e.g., `{"max_depth": 2}`).
+        - `max_train_samples` (int, default 10000): Maximum training samples before downsampling.
+        - `stratified_sampling` (bool, default False): Use stratified sampling for classification tasks.
+        - `enable_target_augmentation` (bool, default True): Augment the RDB with the full training target history table, enabling DFS to derive entity-level target aggregate features (e.g., entity mean). Requires `cutoff_time_column` to be set during `fit`.
+        - `temporal_diff` (dict or TemporalDiffConfig, default `{"enabled": True}`): Convert DFS-generated epoch-time columns into temporal difference features relative to the cutoff time. Supports `enabled` (bool) and `exclude_columns` (list of column names to skip).
+        - `predict_batch_size` (int, default 5000): Batch size for prediction.
 - **`fit(X, y, rdb, key_mappings, cutoff_time_column=None, **kwargs)`**:
     - `X`: Training features (DataFrame).
     - `y`: Training labels (Series).

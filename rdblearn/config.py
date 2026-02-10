@@ -28,7 +28,7 @@ class RDBLearnConfig(BaseModel):
     stratified_sampling: bool = False  # Ignored for RDBLearnRegressor
     
     # Target History Augmentation
-    enable_target_augmentation: bool = False
+    enable_target_augmentation: bool = True
     
     # Prediction Configuration
     predict_batch_size: int = 5000
