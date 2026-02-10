@@ -76,6 +76,11 @@ parameters:
       - 3
       - 4
 
+  # Target augmentation toggle
+  # Maps to enable_target_augmentation in rdblearn/config.py
+  enable_target_augmentation:
+    value: false
+
   # Temporal difference feature transformation config
   # Maps to TemporalDiffConfig in rdblearn/config.py
   temporal_diff:

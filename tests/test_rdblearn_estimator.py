@@ -4,7 +4,9 @@ import numpy as np
 from unittest.mock import MagicMock
 from rdblearn.estimator import RDBLearnClassifier, RDBLearnRegressor
 from rdblearn.config import RDBLearnConfig, TemporalDiffConfig
-from rdblearn.constants import RDBLEARN_DEFAULT_CONFIG
+from rdblearn.constants import RDBLEARN_DEFAULT_CONFIG, TARGET_HISTORY_TABLE_NAME
+import fastdfs
+
 from fastdfs import RDB, DFSConfig
 from fastdfs.api import create_rdb
 
@@ -44,7 +46,7 @@ class TestRDBLearnEstimator(unittest.TestCase):
         # Create synthetic RDB
         # Users table
         self.users_df = pd.DataFrame({
-            'user_id': range(100),
+            'user_id': [str(i) for i in range(100)],
             'age': np.random.randint(18, 80, 100),
             'city': ['New York', 'London', 'Paris', 'Tokyo'] * 25
         })
@@ -52,9 +54,9 @@ class TestRDBLearnEstimator(unittest.TestCase):
         # Transactions table
         self.tx_df = pd.DataFrame({
             'tx_id': range(500),
-            'user_id': np.random.randint(0, 100, 500),
+            'user_id': [str(i) for i in np.random.randint(0, 100, 500)],
             'amount': np.random.rand(500) * 100,
-            'timestamp': pd.date_range('2023-01-01', periods=500, freq='H')
+            'timestamp': pd.date_range('2023-01-01', periods=500, freq='h')
         })
         
         self.rdb = create_rdb(
@@ -78,21 +80,19 @@ class TestRDBLearnEstimator(unittest.TestCase):
         # Create target dataframe (X)
         # We want to predict something for users at a specific time
         self.X_train = pd.DataFrame({
-            'user_id': range(100),
+            'user_id': [str(i) for i in range(100)],
             'cutoff_time': pd.date_range('2023-01-10', periods=100),
             'cat_col': ['a', 'b'] * 50 # Extra column in X
         })
-        self.X_train['user_id'] = self.X_train['user_id'].astype(str)
 
         self.y_train_cls = pd.Series(np.random.randint(0, 2, 100), name='target')
         self.y_train_reg = pd.Series(np.random.rand(100), name='target')
         
         self.X_test = pd.DataFrame({
-            'user_id': range(20),
+            'user_id': [str(i) for i in range(20)],
             'cutoff_time': pd.date_range('2023-02-01', periods=20),
             'cat_col': ['a', 'c'] * 10
         })
-        self.X_test['user_id'] = self.X_test['user_id'].astype(str)
 
         self.key_mappings = {'user_id': 'users.user_id'}
         self.cutoff_time_column = 'cutoff_time'
@@ -192,6 +192,7 @@ class TestRDBLearnEstimator(unittest.TestCase):
         # Check preserved default value (nested)
         self.assertEqual(clf.config.dfs.max_depth, RDBLEARN_DEFAULT_CONFIG["dfs"]["max_depth"])
 
+
     def test_classifier_with_temporal_diff(self):
         """Test classifier with temporal diff feature enabled."""
         base_model = MockTabPFNClassifier()
@@ -223,6 +224,79 @@ class TestRDBLearnEstimator(unittest.TestCase):
 
         preds = clf.predict(self.X_test)
         self.assertEqual(len(preds), 20)
+
+    def test_fit_with_target_augmentation(self):
+        # Enable target augmentation and ensure it works
+        config = RDBLearnConfig(
+            enable_target_augmentation=True,
+            max_train_samples=200 # No downsampling for this test to keep it simple, or make X larger
+        )
+        
+        clf = RDBLearnClassifier(
+            base_estimator=MockTabPFNClassifier(),
+            config=config
+        )
+        
+        # Use a fresh RDB copy as fit transforms it
+        rdb_copy = self.rdb
+        
+        clf.fit(
+            X=self.X_train,
+            y=self.y_train_cls,
+            rdb=rdb_copy,
+            key_mappings=self.key_mappings,
+            cutoff_time_column=self.cutoff_time_column
+        )
+        
+        # Verify 'target_history' table exists in the prepared rdb
+        self.assertIn(TARGET_HISTORY_TABLE_NAME, clf.rdb_.table_names)
+        
+        # Verify the content of target_history
+        history_table = clf.rdb_.get_table(TARGET_HISTORY_TABLE_NAME)
+        # Should have original columns + target + time
+        expected_cols = set(self.X_train.columns) | {self.y_train_cls.name or "target"}
+        self.assertTrue(expected_cols.issubset(history_table.columns))
+        
+        # Verify relationships
+        relationships = clf.rdb_.get_relationships()
+        found_rel = False
+        for rel in relationships:
+            # Check if rel is tuple or object
+            # Depending on fastdfs implem, it might return tuples (child_table, child_col, parent_table, parent_col)
+            # or Relationship objects.
+            c_name, p_name = None, None
+            
+            if isinstance(rel, tuple):
+                 c_table, c_col, p_table, p_col = rel
+                 c_name = c_table if isinstance(c_table, str) else c_table.name
+                 p_name = p_table if isinstance(p_table, str) else p_table.name
+            else:
+                 c_name = rel.child_table.name
+                 p_name = rel.parent_table.name
+
+            if c_name == TARGET_HISTORY_TABLE_NAME and p_name == "users":
+                found_rel = True
+                break
+        self.assertTrue(found_rel, f"Relationship between {TARGET_HISTORY_TABLE_NAME} and users not found")
+
+    def test_target_augmentation_no_cutoff(self):
+        # Should skip augmentation if cutoff_time is missing
+        config = RDBLearnConfig(enable_target_augmentation=True)
+        clf = RDBLearnClassifier(base_estimator=MockTabPFNClassifier(), config=config)
+        
+        rdb_copy = self.rdb
+        
+        # Call fit without cutoff_time_column
+        clf.fit(
+            X=self.X_train.drop(columns=['cutoff_time']),
+            y=self.y_train_cls,
+            rdb=rdb_copy,
+            key_mappings=self.key_mappings,
+            cutoff_time_column=None
+        )
+        
+        # Verify 'target_history' table does NOT exist
+        self.assertNotIn(TARGET_HISTORY_TABLE_NAME, clf.rdb_.table_names)
 
 
 if __name__ == '__main__':

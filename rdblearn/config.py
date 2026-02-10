@@ -16,7 +16,7 @@ class RDBLearnConfig(BaseModel):
     Configuration for RDBLearnEstimator.
     """
     # DFS Configuration (passed to fastdfs)
-    # If None, defaults to: {"max_depth": 3, "agg_primitives": ["max", "min", "mean", "count", "mode", "std"], "engine": "dfs2sql"}
+    # If None, defaults to: {"max_depth": 2, "agg_primitives": ["max", "min", "mean", "count", "mode", "std"], "engine": "dfs2sql"}
     dfs: Optional[DFSConfig] = None
     
     # Preprocessing Configuration (passed to AutoGluon feature generator)
@@ -26,6 +26,9 @@ class RDBLearnConfig(BaseModel):
     # Sampling Configuration
     max_train_samples: int = 10000
     stratified_sampling: bool = False  # Ignored for RDBLearnRegressor
+    
+    # Target History Augmentation
+    enable_target_augmentation: bool = True
     
     # Prediction Configuration
     predict_batch_size: int = 5000
