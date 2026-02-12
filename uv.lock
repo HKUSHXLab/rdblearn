@@ -323,7 +323,7 @@ wheels = [
 [[package]]
 name = "fastdfs"
 version = "0.2.0"
-source = { git = "ssh://git@github.com/dglai/fastdfs.git#e0a85e8adf7d5256fa93deefdcd577cc24035643" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "boto3" },
     { name = "duckdb" },
@@ -342,6 +342,10 @@ dependencies = [
     { name = "sqlalchemy" },
     { name = "sqlglot" },
     { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/09/9f/02573aeb930995219bc2e84f14ad83e48cd5d8817c3ac701de0ba1fe8202/fastdfs-0.2.0.tar.gz", hash = "sha256:43b0a417526814ce582289e7418139b1e9fcff40d34745f2aca4405b0b11a984", size = 86599, upload-time = "2026-02-12T08:34:25.524Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/75/b3/c56207b779ba44ee98563b25a62278cc9068a72bda17c13d0d6a19fbb5c0/fastdfs-0.2.0-py3-none-any.whl", hash = "sha256:c73b40759e7795967fd63822c99c005f252039c982b51123aa05e8487052e195", size = 76623, upload-time = "2026-02-12T08:34:23.539Z" },
 ]
 
 [[package]]
@@ -1395,7 +1399,7 @@ requires-dist = [
     { name = "autogluon-tabular", specifier = ">=1.5.0" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=22.0.0" },
     { name = "einops" },
-    { name = "fastdfs", git = "ssh://git@github.com/dglai/fastdfs.git" },
+    { name = "fastdfs" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=5.0.0" },
     { name = "flash-attn", url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" },
     { name = "huggingface-hub" },
