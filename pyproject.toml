@@ -53,7 +53,6 @@ dependencies = [
     "hyperopt",
     "autogluon.tabular>=1.5.0",
     "tabpfn>=6.3.0",
-    "fastdfs",
     "relbench==1.1.0",
     "wandb>=0.24.0",
 ]
@@ -71,10 +70,10 @@ dev = [
 
 
 [project.urls]
-Homepage = "https://github.com/your-username/multitabfm"
-Documentation = "https://multitabfm.readthedocs.io/"
-Repository = "https://github.com/your-username/multitabfm.git"
-"Bug Tracker" = "https://github.com/your-username/multitabfm/issues"
+Homepage = "https://github.com/HKUSHXLab/rdblearn"
+Repository = "https://github.com/HKUSHXLab/rdblearn"
+Documentation = "https://github.com/HKUSHXLab/rdblearn/blob/main/rdblearn/README.md"
+"Bug Tracker" = "https://github.com/HKUSHXLab/rdblearn/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
