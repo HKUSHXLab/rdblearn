@@ -1,6 +1,0 @@
-{
-    "model_name": "tabpfn",
-    "model_path": "/root/autodl-tmp/tabpfn_2_5/tabpfn-v2.5-classifier-v2.5_default.ckpt",
-    "max_samples": 50000,
-    "batch_size": 5000
-}
