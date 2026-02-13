@@ -27,7 +27,7 @@ git clone https://github.com/HKUSHXLab/rdblearn.git ~/<skill-dir>/skills/use-rdb
 git clone https://github.com/HKUSHXLab/fastdfs.git ~/<skill-dir>/skills/use-rdblearn/codes/fastdfs/
 ```
 
-### 2. Create the Skill
+### 3. Create the Skill
 
 Create `~/<skill-dir>/skills/use-rdblearn/SKILL.md`:
 
@@ -54,6 +54,10 @@ cp -r ~/<skill-dir>/skills/use-rdblearn/codes/rdblearn/examples -r ~/<skill-dir>
 cp -r ~/<skill-dir>/skills/use-rdblearn/codes/fastdfs/README.md -r ~/<skill-dir>/skills/use-rdblearn/docs/fastdfs_README.md
 cp -r ~/<skill-dir>/skills/use-rdblearn/codes/fastdfs/examples -r ~/<skill-dir>/skills/use-rdblearn/docs/fastdfs_examples
 ```
+
+### 4. Provide Skill Status
+
+Show available skills and check whether `use_rdblearn` is on the list
 
 ## Troubleshooting
 
