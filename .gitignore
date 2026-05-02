@@ -158,4 +158,5 @@ cython_debug/
 Thumbs.db
 
 datasets
-limix_cachewandb/
+limix_cache/
+wandb/

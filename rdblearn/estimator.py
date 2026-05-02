@@ -15,6 +15,7 @@ from fastdfs.transform import (
 from .config import RDBLearnConfig
 from .preprocessing import TabularPreprocessor
 from .constants import RDBLEARN_DEFAULT_CONFIG, TARGET_HISTORY_TABLE_NAME
+from .dfs_cache import DFSDiskCache
 
 class RDBLearnEstimator(BaseEstimator):
     def __init__(
@@ -43,6 +44,13 @@ class RDBLearnEstimator(BaseEstimator):
         self.history_df_ = None
         self.target_history_fks_ = None
         self.train_cutoff_time_column_ = None
+
+        self._dfs_cache = DFSDiskCache(
+            cache_dir=self.config.dfs_cache_dir,
+            max_depth_mode=self.config.dfs_cache_max_depth_mode,
+            fixed_max_depth=self.config.dfs_cache_max_depth,
+            rebuild=self.config.dfs_cache_rebuild,
+        )
 
     def _ensure_keys_are_strings(self, X: pd.DataFrame, key_mappings: Dict[str, str]) -> None:
         """Modifies X in place, using safe_convert_to_string for consistency with RDB."""
@@ -223,14 +231,11 @@ class RDBLearnEstimator(BaseEstimator):
 
         # 4. Feature Augmentation
         logger.info("Computing DFS features...")
-        dfs_config = self.config.dfs or DFSConfig()
-        
-        X_dfs = fastdfs.compute_dfs_features(
-            self.rdb_,
-            X,
+        X_dfs = self._compute_dfs_features(
+            rdb=self.rdb_,
+            X=X,
             key_mappings=key_mappings,
             cutoff_time_column=cutoff_time_column,
-            config=dfs_config
         )
         logger.debug(f"DFS features: {X_dfs.columns.tolist()}")
 
@@ -264,15 +269,11 @@ class RDBLearnEstimator(BaseEstimator):
             
         # 3. Feature Augmentation
         logger.info("Computing DFS features...")
-        
-        dfs_config = self.config.dfs or DFSConfig()
-        
-        X_dfs = fastdfs.compute_dfs_features(
-            selected_rdb, 
-            X, 
-            key_mappings=self.key_mappings_, 
-            cutoff_time_column=self.cutoff_time_column_, 
-            config=dfs_config
+        X_dfs = self._compute_dfs_features(
+            rdb=selected_rdb,
+            X=X,
+            key_mappings=self.key_mappings_,
+            cutoff_time_column=self.cutoff_time_column_,
         )
 
 
@@ -310,6 +311,50 @@ class RDBLearnEstimator(BaseEstimator):
                 return np.concatenate(results)
         else:
             return predict_func(X_transformed, **kwargs)
+
+    def _compute_dfs_features(
+        self,
+        rdb: RDB,
+        X: pd.DataFrame,
+        key_mappings: Dict[str, str],
+        cutoff_time_column: Optional[str],
+    ) -> pd.DataFrame:
+        dfs_config = self.config.dfs or DFSConfig()
+        if not self.config.dfs_cache_enabled:
+            return fastdfs.compute_dfs_features(
+                rdb,
+                X,
+                key_mappings=key_mappings,
+                cutoff_time_column=cutoff_time_column,
+                config=dfs_config,
+            )
+
+        extra_fingerprint = {
+            "target_augmentation": self.config.enable_target_augmentation,
+            "temporal_diff_enabled": bool(self.config.temporal_diff and self.config.temporal_diff.enabled),
+        }
+        context = self._dfs_cache.build_context(
+            rdb=rdb,
+            target_dataframe=X,
+            key_mappings=key_mappings,
+            cutoff_time_column=cutoff_time_column,
+            dfs_config=dfs_config,
+            extra_fingerprint=extra_fingerprint,
+        )
+
+        def _compute(max_depth: int):
+            effective = dfs_config.copy(deep=True)
+            effective.max_depth = max_depth
+            return fastdfs.compute_dfs_features(
+                rdb,
+                X,
+                key_mappings=key_mappings,
+                cutoff_time_column=cutoff_time_column,
+                config=effective,
+                return_metadata=True,
+            )
+
+        return self._dfs_cache.load_or_compute(context, _compute)
 
 class RDBLearnClassifier(RDBLearnEstimator, ClassifierMixin):
     def predict(self, X: pd.DataFrame, rdb: Optional[RDB] = None, **kwargs):

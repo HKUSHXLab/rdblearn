@@ -2,7 +2,10 @@ import unittest
 import pandas as pd
 import numpy as np
 from unittest.mock import MagicMock
+from unittest.mock import patch
+import tempfile
 from rdblearn.estimator import RDBLearnClassifier, RDBLearnRegressor
+from rdblearn.dfs_cache import DFSDiskCache
 from rdblearn.config import RDBLearnConfig, TemporalDiffConfig
 from rdblearn.constants import RDBLEARN_DEFAULT_CONFIG, TARGET_HISTORY_TABLE_NAME
 import fastdfs
@@ -297,6 +300,125 @@ class TestRDBLearnEstimator(unittest.TestCase):
         
         # Verify 'target_history' table does NOT exist
         self.assertNotIn(TARGET_HISTORY_TABLE_NAME, clf.rdb_.table_names)
+
+    def test_dfs_cache_hit_miss(self):
+        with tempfile.TemporaryDirectory() as cache_dir:
+            config = RDBLearnConfig(
+                dfs=DFSConfig(max_depth=2),
+                dfs_cache_enabled=True,
+                dfs_cache_dir=cache_dir,
+                dfs_cache_max_depth_mode="requested",
+            )
+            clf = RDBLearnClassifier(base_estimator=MockTabPFNClassifier(), config=config)
+            x_small = self.X_train.head(8).copy()
+
+            call_counter = {"count": 0}
+
+            def fake_compute(rdb, target_dataframe, key_mappings, cutoff_time_column, config, return_metadata=False):
+                call_counter["count"] += 1
+                out = target_dataframe.copy()
+                out["f_depth_1"] = np.arange(len(target_dataframe))
+                metadata = {
+                    "original_columns": list(target_dataframe.columns),
+                    "features": [{"feature_name": "f_depth_1", "depth": 1}],
+                }
+                if return_metadata:
+                    return out, metadata
+                return out
+
+            with patch("fastdfs.compute_dfs_features", side_effect=fake_compute):
+                first = clf._compute_dfs_features(
+                    rdb=self.rdb,
+                    X=x_small,
+                    key_mappings=self.key_mappings,
+                    cutoff_time_column=self.cutoff_time_column,
+                )
+                second = clf._compute_dfs_features(
+                    rdb=self.rdb,
+                    X=x_small,
+                    key_mappings=self.key_mappings,
+                    cutoff_time_column=self.cutoff_time_column,
+                )
+
+            self.assertEqual(call_counter["count"], 1)
+            self.assertIn("f_depth_1", first.columns)
+            pd.testing.assert_frame_equal(first, second)
+
+    def test_dfs_cache_key_ignores_engine_path(self):
+        """Sweep passes a unique temp DuckDB path per run; it must not bust the cache key."""
+        cache = DFSDiskCache(cache_dir="/tmp/rdblearn_dfs_cache_key_test", max_depth_mode="requested")
+        x_small = self.X_train.head(4).copy()
+        ctx_a = cache.build_context(
+            rdb=self.rdb,
+            target_dataframe=x_small,
+            key_mappings=self.key_mappings,
+            cutoff_time_column=self.cutoff_time_column,
+            dfs_config=DFSConfig(max_depth=2, engine_path="/tmp/run_a.db"),
+            extra_fingerprint={"target_augmentation": False, "temporal_diff_enabled": True},
+        )
+        ctx_b = cache.build_context(
+            rdb=self.rdb,
+            target_dataframe=x_small,
+            key_mappings=self.key_mappings,
+            cutoff_time_column=self.cutoff_time_column,
+            dfs_config=DFSConfig(max_depth=2, engine_path="/tmp/run_b.db"),
+            extra_fingerprint={"target_augmentation": False, "temporal_diff_enabled": True},
+        )
+        self.assertEqual(ctx_a.key, ctx_b.key)
+
+    def test_dfs_cache_depth_slicing(self):
+        with tempfile.TemporaryDirectory() as cache_dir:
+            config = RDBLearnConfig(
+                dfs=DFSConfig(max_depth=2),
+                dfs_cache_enabled=True,
+                dfs_cache_dir=cache_dir,
+                dfs_cache_max_depth_mode="fixed_max",
+                dfs_cache_max_depth=4,
+            )
+            clf = RDBLearnClassifier(base_estimator=MockTabPFNClassifier(), config=config)
+            x_small = self.X_train.head(8).copy()
+
+            called_depths = []
+
+            def fake_compute(rdb, target_dataframe, key_mappings, cutoff_time_column, config, return_metadata=False):
+                called_depths.append(config.max_depth)
+                out = target_dataframe.copy()
+                out["f_depth_1"] = 1
+                out["f_depth_3"] = 3
+                out["f_depth_4"] = 4
+                metadata = {
+                    "original_columns": list(target_dataframe.columns),
+                    "features": [
+                        {"feature_name": "f_depth_1", "depth": 1},
+                        {"feature_name": "f_depth_3", "depth": 3},
+                        {"feature_name": "f_depth_4", "depth": 4},
+                    ],
+                }
+                if return_metadata:
+                    return out, metadata
+                return out
+
+            with patch("fastdfs.compute_dfs_features", side_effect=fake_compute):
+                depth2 = clf._compute_dfs_features(
+                    rdb=self.rdb,
+                    X=x_small,
+                    key_mappings=self.key_mappings,
+                    cutoff_time_column=self.cutoff_time_column,
+                )
+                clf.config.dfs.max_depth = 3
+                depth3 = clf._compute_dfs_features(
+                    rdb=self.rdb,
+                    X=x_small,
+                    key_mappings=self.key_mappings,
+                    cutoff_time_column=self.cutoff_time_column,
+                )
+
+            self.assertEqual(called_depths, [4])
+            self.assertIn("f_depth_1", depth2.columns)
+            self.assertNotIn("f_depth_3", depth2.columns)
+            self.assertNotIn("f_depth_4", depth2.columns)
+            self.assertIn("f_depth_3", depth3.columns)
+            self.assertNotIn("f_depth_4", depth3.columns)
 
 
 if __name__ == '__main__':
