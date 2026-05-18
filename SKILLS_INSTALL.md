@@ -1,7 +1,8 @@
 # Installing use-rdblearn for Code Agents
 
-Current RBDLearn version: 0.1.0
-Make sure you are working with the right version
+Current RDBLearn version: 0.1.1 (FastDFS 0.2.1)
+
+Make sure you are working with the right version.
 
 ## Prerequisites
 
@@ -22,9 +23,23 @@ mkdir ~/<skill-dir>/skills/use-rdblearn/codes
 
 ### 2. Clone RDBLearn and FastDFS
 
+Use the **release tags** for this skill bundle (not branches): RDBLearn **v0.1.1**, FastDFS **v0.2.1**.
+
 ```bash
-git clone https://github.com/HKUSHXLab/rdblearn.git ~/<skill-dir>/skills/use-rdblearn/codes/rdblearn/
-git clone https://github.com/HKUSHXLab/fastdfs.git ~/<skill-dir>/skills/use-rdblearn/codes/fastdfs/
+git clone --depth 1 https://github.com/HKUSHXLab/rdblearn.git ~/<skill-dir>/skills/use-rdblearn/codes/rdblearn/
+cd ~/<skill-dir>/skills/use-rdblearn/codes/rdblearn && git checkout v0.1.1
+
+git clone --depth 1 https://github.com/HKUSHXLab/fastdfs.git ~/<skill-dir>/skills/use-rdblearn/codes/fastdfs/
+cd ~/<skill-dir>/skills/use-rdblearn/codes/fastdfs && git checkout v0.2.1
+```
+
+(`git clone --branch NAME` also accepts tag names, but `v0.2.1` / `v0.1.1` are annotated tags on GitHub, not branches—`git checkout` after clone is the clearest approach.)
+
+Verify the checkout:
+
+```bash
+cd ~/<skill-dir>/skills/use-rdblearn/codes/fastdfs && git describe --tags --exact-match
+cd ~/<skill-dir>/skills/use-rdblearn/codes/rdblearn && git describe --tags --exact-match
 ```
 
 ### 3. Create the Skill
