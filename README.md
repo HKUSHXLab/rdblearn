@@ -28,16 +28,27 @@
 
 ## ⚙️ Installation
 
+Requires **Python 3.12**.
+
 ```bash
 pip install rdblearn
+```
+
+This installs `fastdfs` and other PyPI dependencies. For **flash-attn** (CUDA / LimiX-style GPU workloads), install separately — PyPI packages cannot declare direct URL dependencies:
+
+```bash
+pip install -r requirements-gpu.txt
 ```
 
 Or install from source:
 
 ```bash
-git clone https://github.com/your-username/rdblearn.git
+git clone https://github.com/HKUSHXLab/rdblearn.git
 cd rdblearn
+git checkout v0.1.2
 pip install -e .
+# optional GPU wheel:
+pip install -r requirements-gpu.txt
 ```
 
 ---

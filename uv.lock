@@ -343,9 +343,9 @@ dependencies = [
     { name = "sqlglot" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/71/e2/73d5a6797353d7558737bea695b392ae07d19c1884e55b804a4e3b57d620/fastdfs-0.2.1.tar.gz", hash = "sha256:c5eb768d8644376ae07975340b8e6f009f1c3c7a456a7fc1d5f6b994fd034889", size = 88450, upload-time = "2026-05-18T07:28:19Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/71/e2/73d5a6797353d7558737bea695b392ae07d19c1884e55b804a4e3b57d620/fastdfs-0.2.1.tar.gz", hash = "sha256:c5eb768d8644376ae07975340b8e6f009f1c3c7a456a7fc1d5f6b994fd034889", size = 88450, upload-time = "2026-05-18T07:28:19.301Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/40/0b/c79f80928a1d58a4a62065e0bc88036cc8d095556ccaf959ff40ed1721f4/fastdfs-0.2.1-py3-none-any.whl", hash = "sha256:e651a3b5db092a11deab0c9f01fe5797425caacb5e312833106e508994b2b0e3", size = 77734, upload-time = "2026-05-18T07:28:18Z" },
+    { url = "https://files.pythonhosted.org/packages/40/0b/c79f80928a1d58a4a62065e0bc88036cc8d095556ccaf959ff40ed1721f4/fastdfs-0.2.1-py3-none-any.whl", hash = "sha256:e651a3b5db092a11deab0c9f01fe5797425caacb5e312833106e508994b2b0e3", size = 77734, upload-time = "2026-05-18T07:28:18.065Z" },
 ]
 
 [[package]]
@@ -1354,13 +1354,12 @@ wheels = [
 
 [[package]]
 name = "rdblearn"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "autogluon-tabular" },
     { name = "einops" },
     { name = "fastdfs" },
-    { name = "flash-attn" },
     { name = "huggingface-hub" },
     { name = "hyperopt" },
     { name = "kditransform" },
@@ -1401,7 +1400,6 @@ requires-dist = [
     { name = "einops" },
     { name = "fastdfs", specifier = "==0.2.1" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=5.0.0" },
-    { name = "flash-attn", url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" },
     { name = "huggingface-hub" },
     { name = "hyperopt" },
     { name = "isort", marker = "extra == 'dev'", specifier = ">=5.10.0" },

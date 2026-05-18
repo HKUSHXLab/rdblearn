@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rdblearn"
-version = "0.1.1"
+version = "0.1.2"
 description = "Relational Database Learning with Foundation Models"
 readme = "README.md"
 license = {text = "MIT"}
@@ -48,7 +48,6 @@ dependencies = [
     "tqdm",
     "typing_extensions",
     "xgboost",
-    "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl",
     "kditransform",
     "hyperopt",
     "autogluon.tabular>=1.5.0",

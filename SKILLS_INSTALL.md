@@ -1,6 +1,6 @@
 # Installing use-rdblearn for Code Agents
 
-Current RDBLearn version: 0.1.1 (FastDFS 0.2.1)
+Current RDBLearn version: 0.1.2 (FastDFS 0.2.1)
 
 Make sure you are working with the right version.
 
@@ -23,17 +23,23 @@ mkdir ~/<skill-dir>/skills/use-rdblearn/codes
 
 ### 2. Clone RDBLearn and FastDFS
 
-Use the **release tags** for this skill bundle (not branches): RDBLearn **v0.1.1**, FastDFS **v0.2.1**.
+Use the **release tags** for this skill bundle (not branches): RDBLearn **v0.1.2**, FastDFS **v0.2.1**.
 
 ```bash
 git clone --depth 1 https://github.com/HKUSHXLab/rdblearn.git ~/<skill-dir>/skills/use-rdblearn/codes/rdblearn/
-cd ~/<skill-dir>/skills/use-rdblearn/codes/rdblearn && git checkout v0.1.1
+cd ~/<skill-dir>/skills/use-rdblearn/codes/rdblearn && git checkout v0.1.2
 
 git clone --depth 1 https://github.com/HKUSHXLab/fastdfs.git ~/<skill-dir>/skills/use-rdblearn/codes/fastdfs/
 cd ~/<skill-dir>/skills/use-rdblearn/codes/fastdfs && git checkout v0.2.1
 ```
 
-(`git clone --branch NAME` also accepts tag names, but `v0.2.1` / `v0.1.1` are annotated tags on GitHub, not branches—`git checkout` after clone is the clearest approach.)
+(`git clone --branch NAME` also accepts tag names, but `v0.2.1` / `v0.1.2` are annotated tags on GitHub, not branches—`git checkout` after clone is the clearest approach.)
+
+For GPU / flash-attn (optional, not on PyPI metadata):
+
+```bash
+pip install -r ~/<skill-dir>/skills/use-rdblearn/codes/rdblearn/requirements-gpu.txt
+```
 
 Verify the checkout:
 
