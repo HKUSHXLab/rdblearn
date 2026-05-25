@@ -298,6 +298,54 @@ class TestRDBLearnEstimator(unittest.TestCase):
         # Verify 'target_history' table does NOT exist
         self.assertNotIn(TARGET_HISTORY_TABLE_NAME, clf.rdb_.table_names)
 
+    def test_encode_categorical_as_float_config(self):
+        config = RDBLearnConfig(encode_categorical_as_float=True)
+        clf = RDBLearnClassifier(
+            base_estimator=MockTabPFNClassifier(),
+            config=config,
+        )
+        self.assertTrue(clf.config.encode_categorical_as_float)
+
+    def test_encode_categorical_as_float_fit_predict(self):
+        config = RDBLearnConfig(
+            encode_categorical_as_float=True,
+            enable_target_augmentation=False,
+        )
+        clf = RDBLearnClassifier(
+            base_estimator=MockTabPFNClassifier(),
+            config=config,
+        )
+        clf.fit(
+            self.X_train,
+            self.y_train_cls,
+            rdb=self.rdb,
+            key_mappings=self.key_mappings,
+            cutoff_time_column=self.cutoff_time_column,
+        )
+        self.assertIsNotNone(clf.rdb_category_encoders_)
+        self.assertIn("cat_col", clf.task_category_encoders_)
+        preds = clf.predict(self.X_test)
+        self.assertEqual(len(preds), 20)
+        # Unseen category 'c' in test should not break predict
+        proba = clf.predict_proba(self.X_test)
+        self.assertEqual(proba.shape[0], 20)
+
+    def test_encode_categorical_as_float_disabled(self):
+        config = RDBLearnConfig(encode_categorical_as_float=False)
+        clf = RDBLearnClassifier(
+            base_estimator=MockTabPFNClassifier(),
+            config=config,
+        )
+        clf.fit(
+            self.X_train,
+            self.y_train_cls,
+            rdb=self.rdb,
+            key_mappings=self.key_mappings,
+            cutoff_time_column=self.cutoff_time_column,
+        )
+        self.assertIsNone(clf.rdb_category_encoders_)
+        self.assertIsNone(clf.task_category_encoders_)
+
 
 if __name__ == '__main__':
     unittest.main()

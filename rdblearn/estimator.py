@@ -3,14 +3,16 @@ import pandas as pd
 import numpy as np
 from loguru import logger
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
+from sklearn.preprocessing import LabelEncoder
 import fastdfs
 from fastdfs import RDB, DFSConfig
 from fastdfs.utils.type_utils import safe_convert_to_string
 from fastdfs.transform import (
     RDBTransformWrapper, RDBTransformPipeline, HandleDummyTable, 
     FeaturizeDatetime, FillMissingPrimaryKey, 
-    FilterColumn, CanonicalizeTypes
+    FilterColumn, CanonicalizeTypes, EncodeCategoryColumns,
 )
+from fastdfs.transform.encode_categorical import encode_series_with_label_encoder
 
 from .config import RDBLearnConfig
 from .preprocessing import TabularPreprocessor
@@ -43,6 +45,8 @@ class RDBLearnEstimator(BaseEstimator):
         self.history_df_ = None
         self.target_history_fks_ = None
         self.train_cutoff_time_column_ = None
+        self.rdb_category_encoders_ = None
+        self.task_category_encoders_ = None
 
     def _ensure_keys_are_strings(self, X: pd.DataFrame, key_mappings: Dict[str, str]) -> None:
         """Modifies X in place, using safe_convert_to_string for consistency with RDB."""
@@ -50,6 +54,50 @@ class RDBLearnEstimator(BaseEstimator):
             if col in X.columns:
                 X[col] = safe_convert_to_string(X[col])
 
+    def _task_categorical_columns(
+        self,
+        X: pd.DataFrame,
+        key_mappings: Dict[str, str],
+        cutoff_time_column: Optional[str],
+    ) -> List[str]:
+        exclude = set(key_mappings.keys())
+        if cutoff_time_column is not None:
+            exclude.add(cutoff_time_column)
+        cols: List[str] = []
+        for col in X.columns:
+            if col in exclude:
+                continue
+            dtype = X[col].dtype
+            if pd.api.types.is_object_dtype(dtype) or pd.api.types.is_categorical_dtype(dtype):
+                cols.append(col)
+        return cols
+
+    def _fit_task_categorical_encoders(
+        self,
+        X: pd.DataFrame,
+        key_mappings: Dict[str, str],
+        cutoff_time_column: Optional[str],
+    ) -> None:
+        cols = self._task_categorical_columns(X, key_mappings, cutoff_time_column)
+        self.task_category_encoders_ = {}
+        for col in cols:
+            le = LabelEncoder()
+            le.fit(X[col].astype(str))
+            self.task_category_encoders_[col] = le
+            logger.debug(
+                f"Task categorical encoder fitted for {col} ({len(le.classes_)} classes)"
+            )
+
+    def _apply_task_categorical_encoders(self, X: pd.DataFrame) -> pd.DataFrame:
+        encoders = self.task_category_encoders_
+        if not encoders:
+            return X
+        out = X.copy()
+        for col, le in encoders.items():
+            if col not in out.columns:
+                continue
+            out[col] = encode_series_with_label_encoder(out[col], le)
+        return out
 
     def _downsample(
         self,
@@ -156,14 +204,21 @@ class RDBLearnEstimator(BaseEstimator):
             rdb.validate_key_consistency()
 
         logger.info("Preparing RDB with transformation pipeline.")
-        pipeline = RDBTransformPipeline([
+        steps = [
             HandleDummyTable(),
             FillMissingPrimaryKey(),
             RDBTransformWrapper(FeaturizeDatetime(features=["epochtime"])),
             RDBTransformWrapper(FilterColumn(drop_dtypes=["text"])),
-            RDBTransformWrapper(CanonicalizeTypes()),
-        ])
-        return pipeline(rdb)
+        ]
+        encode_transform = None
+        if self.config.encode_categorical_as_float:
+            encode_transform = EncodeCategoryColumns(encoders=self.rdb_category_encoders_)
+            steps.append(RDBTransformWrapper(encode_transform))
+        steps.append(RDBTransformWrapper(CanonicalizeTypes()))
+        rdb = RDBTransformPipeline(steps)(rdb)
+        if encode_transform is not None and self.rdb_category_encoders_ is None:
+            self.rdb_category_encoders_ = encode_transform.encoders
+        return rdb
 
     def fit(
         self, 
@@ -221,6 +276,10 @@ class RDBLearnEstimator(BaseEstimator):
             X = downsampled_data.drop(columns=[target_col])
             y = downsampled_data[target_col]
 
+        if self.config.encode_categorical_as_float:
+            self._fit_task_categorical_encoders(X, key_mappings, cutoff_time_column)
+            X = self._apply_task_categorical_encoders(X)
+
         # 4. Feature Augmentation
         logger.info("Computing DFS features...")
         dfs_config = self.config.dfs or DFSConfig()
@@ -261,7 +320,10 @@ class RDBLearnEstimator(BaseEstimator):
         else:
             # Augment new RDB with stored training history!
             selected_rdb = self._prepare_rdb(rdb)
-            
+
+        if self.config.encode_categorical_as_float:
+            X = self._apply_task_categorical_encoders(X)
+
         # 3. Feature Augmentation
         logger.info("Computing DFS features...")
         
