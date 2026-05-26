@@ -1,8 +1,8 @@
-from typing import Optional, Dict, Union, List
+from typing import Optional, Dict, Union, List, Any
 import pandas as pd
 import numpy as np
 from loguru import logger
-from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
+from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin, clone
 from sklearn.preprocessing import LabelEncoder
 import fastdfs
 from fastdfs import RDB, DFSConfig
@@ -17,6 +17,7 @@ from fastdfs.transform.encode_categorical import encode_series_with_label_encode
 from .config import RDBLearnConfig
 from .preprocessing import TabularPreprocessor
 from .constants import RDBLEARN_DEFAULT_CONFIG, TARGET_HISTORY_TABLE_NAME
+from .base10_hierarchical import Base10Decomposer, reconstruct_class_proba_from_digit_probs
 
 class RDBLearnEstimator(BaseEstimator):
     def __init__(
@@ -301,12 +302,41 @@ class RDBLearnEstimator(BaseEstimator):
             cutoff_time=cutoff_time_column
         )
         X_transformed = self.preprocessor_.fit(X_dfs).transform(X_dfs)
-        
-        # 6. Model Training
+        self.downstream_feature_columns_ = list(X_transformed.columns)
+
+        return self._fit_model(X_transformed, y, **kwargs)
+
+    def _fit_model(self, X_transformed: pd.DataFrame, y: pd.Series, **kwargs):
+        """Train the base estimator on preprocessed features (regression default)."""
         logger.info("Fitting base estimator ...")
         self.base_estimator.fit(X_transformed, y, **kwargs)
-        
         return self
+
+    def _transform_for_prediction(self, X: pd.DataFrame, rdb: Optional[RDB]) -> pd.DataFrame:
+        """DFS + preprocessor transform (same as predict path, without calling the base model)."""
+        X = X.copy()
+        if self.key_mappings_:
+            self._ensure_keys_are_strings(X, self.key_mappings_)
+
+        if rdb is None:
+            selected_rdb = self.rdb_
+        else:
+            selected_rdb = self._prepare_rdb(rdb)
+
+        if self.config.encode_categorical_as_float:
+            X = self._apply_task_categorical_encoders(X)
+
+        logger.info("Computing DFS features...")
+        dfs_config = self.config.dfs or DFSConfig()
+        X_dfs = fastdfs.compute_dfs_features(
+            selected_rdb,
+            X,
+            key_mappings=self.key_mappings_,
+            cutoff_time_column=self.cutoff_time_column_,
+            config=dfs_config,
+        )
+        logger.info("Preprocessing augmented features ...")
+        return self.preprocessor_.transform(X_dfs)
 
     def _predict_common(self, X: pd.DataFrame, rdb: Optional[RDB], method: str, **kwargs):
         # 0. Copy and ensure keys are string
@@ -374,10 +404,85 @@ class RDBLearnEstimator(BaseEstimator):
             return predict_func(X_transformed, **kwargs)
 
 class RDBLearnClassifier(RDBLearnEstimator, ClassifierMixin):
+    def _fit_model(self, X_transformed: pd.DataFrame, y: pd.Series, **kwargs):
+        y_series = y if isinstance(y, pd.Series) else pd.Series(y, name="target")
+        le = LabelEncoder()
+        y_enc = le.fit_transform(y_series)
+        C = int(len(le.classes_))
+
+        self.label_encoder_ = le
+        self.classes_ = np.asarray(le.classes_)
+        self.n_classes_ = C
+
+        self.base10_hierarchical_ = False
+        self.base10_decomposer_ = None
+        self.digit_estimators_ = None
+
+        if C <= 10:
+            logger.info(f"Fitting base estimator (C={C}, single head) ...")
+            self.base_estimator.fit(X_transformed, y_series, **kwargs)
+            return self
+
+        self.base10_hierarchical_ = True
+
+        decomposer = Base10Decomposer(C)
+        self.base10_decomposer_ = decomposer
+        train_digits = decomposer.digits_for_array(y_enc)
+        digit_estimators: List[Any] = []
+        for i in range(decomposer.D):
+            est = clone(self.base_estimator)
+            y_digit = pd.Series(
+                train_digits[i], index=X_transformed.index, name=y_series.name
+            )
+            est.fit(X_transformed, y_digit, **kwargs)
+            digit_estimators.append(est)
+        self.digit_estimators_ = digit_estimators
+        logger.info(
+            f"Fitted base-10-hierarchical classifier (C={C}, D={decomposer.D} digit heads)."
+        )
+        return self
+
+    def _batched_predict_proba_subestimator(
+        self, estimator: Any, X_transformed: pd.DataFrame, **kwargs
+    ) -> np.ndarray:
+        fn = getattr(estimator, "predict_proba")
+        bs = self.config.predict_batch_size
+        if bs and len(X_transformed) > bs:
+            parts = []
+            for i in range(0, len(X_transformed), bs):
+                batch = X_transformed.iloc[i : i + bs]
+                parts.append(np.asarray(fn(batch, **kwargs)))
+            return np.concatenate(parts, axis=0)
+        return np.asarray(fn(X_transformed, **kwargs))
+
+    def _predict_proba_base10_hierarchical(
+        self, X_transformed: pd.DataFrame, **kwargs
+    ) -> np.ndarray:
+        digit_probs = [
+            self._batched_predict_proba_subestimator(est, X_transformed, **kwargs)
+            for est in self.digit_estimators_
+        ]
+        return reconstruct_class_proba_from_digit_probs(
+            self.base10_decomposer_, digit_probs, self.n_classes_
+        )
+
     def predict(self, X: pd.DataFrame, rdb: Optional[RDB] = None, **kwargs):
+        if getattr(self, "base10_hierarchical_", False):
+            proba = self.predict_proba(X, rdb, **kwargs)
+            idx = np.argmax(proba, axis=1)
+            return self.classes_.take(idx.astype(np.intp, copy=False))
         return self._predict_common(X, rdb, method="predict", **kwargs)
 
     def predict_proba(self, X: pd.DataFrame, rdb: Optional[RDB] = None, **kwargs):
+        if getattr(self, "base10_hierarchical_", False):
+            from sklearn.utils.validation import check_is_fitted
+
+            check_is_fitted(
+                self, attributes=["digit_estimators_", "base10_decomposer_"]
+            )
+            X_transformed = self._transform_for_prediction(X, rdb)
+            logger.info("Making predictions (base-10-hierarchical) ...")
+            return self._predict_proba_base10_hierarchical(X_transformed, **kwargs)
         return self._predict_common(X, rdb, method="predict_proba", **kwargs)
 
 class RDBLearnRegressor(RDBLearnEstimator, RegressorMixin):

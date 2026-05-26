@@ -137,6 +137,8 @@ Scikit-learn compatible estimators for relational learning.
     - `rdb`: Optional RDB context (uses the one from `fit` if not provided).
 - **`predict_proba(X, rdb=None, **kwargs)`**: (Classifier only) Predict class probabilities.
 
+**Multiclass (>10 classes):** For classification tasks with more than 10 training classes, `RDBLearnClassifier` automatically uses **base-10-hierarchical** inference: the label space is decomposed into decimal digit heads (each head has at most 10 classes, compatible with TabPFN), then digit probabilities are fused into a full `(n_samples, C)` matrix. No extra configuration is required. Tasks with **C ≤ 10** use a single model on the original target.
+
 ### `TaskMetadata`
 Data structure containing task-specific information.
 - `key_mappings`: Dict[str, str]

@@ -16,7 +16,7 @@ except ImportError:
 
 import fastdfs.adapter
 
-from rdblearn.datasets import RDBDataset, Task, TaskMetadata
+from rdblearn.datasets import RDBDataset, Task, TaskMetadata, _primary_relbench_metric
 
 class TestRDBDataset(unittest.TestCase):
     @patch('rdblearn.datasets.load_rdb')
@@ -88,7 +88,11 @@ class TestRDBDataset(unittest.TestCase):
         mock_task.target_col = "target"
         mock_task.time_col = "timestamp"
         mock_task.task_type.value = "binary_classification"
-        mock_task.metrics = [MagicMock(__name__="auc")]
+        mock_task.metrics = [
+            MagicMock(__name__="accuracy"),
+            MagicMock(__name__="f1"),
+            MagicMock(__name__="roc_auc"),
+        ]
         
         mock_relbench_tasks.get_task.return_value = mock_task
         
@@ -102,10 +106,81 @@ class TestRDBDataset(unittest.TestCase):
         
         self.assertEqual(task.metadata.key_mappings, {"user_id": "users.id"})
         self.assertEqual(task.metadata.target_col, "target")
-        self.assertEqual(task.metadata.evaluation_metric, "auc")
+        self.assertEqual(task.metadata.evaluation_metric, "roc_auc")
         
         mock_adapter_cls.assert_called_with("dummy_dataset")
         mock_relbench_tasks.get_task_names.assert_called_with("dummy_dataset")
+
+    @patch('relbench.tasks')
+    @patch('fastdfs.adapter.RelBenchAdapter')
+    def test_from_relbench_prefers_mrr(self, mock_adapter_cls, mock_relbench_tasks):
+        mock_rdb = MagicMock()
+        mock_rdb.get_table_metadata.return_value.primary_key = "id"
+        mock_adapter_cls.return_value.load.return_value = mock_rdb
+
+        mock_relbench_tasks.get_task_names.return_value = ["sales-payterms"]
+        mock_task = MagicMock()
+        mock_task.get_table.return_value.df = pd.DataFrame({'col': [1, 2]})
+        mock_task.entity_table = "sales"
+        mock_task.entity_col = "sales_id"
+        mock_task.target_col = "target"
+        mock_task.time_col = "timestamp"
+        mock_task.task_type.value = "multiclass_classification"
+        mock_task.metrics = [
+            MagicMock(__name__="accuracy"),
+            MagicMock(__name__="macro_f1"),
+            MagicMock(__name__="micro_f1"),
+            MagicMock(__name__="mrr"),
+        ]
+        mock_relbench_tasks.get_task.return_value = mock_task
+
+        dataset = RDBDataset.from_relbench("rel-salt")
+        self.assertEqual(
+            dataset.tasks["sales-payterms"].metadata.evaluation_metric, "mrr"
+        )
+
+    def test_primary_relbench_metric_prefers_roc_auc_over_accuracy(self):
+        names = ["accuracy", "average_precision", "f1", "roc_auc"]
+        self.assertEqual(
+            _primary_relbench_metric(names, task_type="binary_classification"),
+            "roc_auc",
+        )
+
+    def test_primary_relbench_metric_regression_prefers_mae(self):
+        names = ["r2", "mae", "rmse"]
+        self.assertEqual(
+            _primary_relbench_metric(names, task_type="regression"),
+            "mae",
+        )
+
+    @patch('relbench.tasks')
+    @patch('fastdfs.adapter.RelBenchAdapter')
+    def test_from_relbench_prefers_roc_auc(self, mock_adapter_cls, mock_relbench_tasks):
+        mock_rdb = MagicMock()
+        mock_rdb.get_table_metadata.return_value.primary_key = "id"
+        mock_adapter_cls.return_value.load.return_value = mock_rdb
+
+        mock_relbench_tasks.get_task_names.return_value = ["user-churn"]
+        mock_task = MagicMock()
+        mock_task.get_table.return_value.df = pd.DataFrame({"col": [1, 2]})
+        mock_task.entity_table = "users"
+        mock_task.entity_col = "user_id"
+        mock_task.target_col = "target"
+        mock_task.time_col = "timestamp"
+        mock_task.task_type.value = "binary_classification"
+        mock_task.metrics = [
+            MagicMock(__name__="accuracy"),
+            MagicMock(__name__="average_precision"),
+            MagicMock(__name__="f1"),
+            MagicMock(__name__="roc_auc"),
+        ]
+        mock_relbench_tasks.get_task.return_value = mock_task
+
+        dataset = RDBDataset.from_relbench("rel-ratebeer")
+        self.assertEqual(
+            dataset.tasks["user-churn"].metadata.evaluation_metric,
+            "roc_auc",
+        )
 
     @patch('relbench.tasks')
     @patch('fastdfs.adapter.RelBenchAdapter')

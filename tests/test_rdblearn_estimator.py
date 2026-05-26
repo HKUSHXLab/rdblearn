@@ -14,24 +14,44 @@ from loguru import logger
 logger.enable("rdblearn")
 
 class MockTabPFNClassifier:
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
+    def __init__(self, seed=42):
+        self.seed = seed
         self.classes_ = np.array([0, 1])
+
+    def get_params(self, deep=True):
+        return {"seed": self.seed}
+
+    def set_params(self, seed=42, **params):
+        self.seed = seed
+        return self
 
     def fit(self, X, y, **kwargs):
         self.X_fit = X
         self.y_fit = y
+        y_arr = np.asarray(y)
+        self.classes_ = np.unique(y_arr)
         return self
 
     def predict(self, X, **kwargs):
-        return np.random.randint(0, 2, size=len(X))
+        n = len(self.classes_)
+        return np.random.choice(self.classes_, size=len(X))
 
     def predict_proba(self, X, **kwargs):
-        return np.random.rand(len(X), 2)
+        n_classes = len(self.classes_)
+        proba = np.random.rand(len(X), n_classes)
+        proba /= proba.sum(axis=1, keepdims=True)
+        return proba
 
 class MockTabPFNRegressor:
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
+    def __init__(self, seed=42):
+        self.seed = seed
+
+    def get_params(self, deep=True):
+        return {"seed": self.seed}
+
+    def set_params(self, seed=42, **params):
+        self.seed = seed
+        return self
 
     def fit(self, X, y, **kwargs):
         self.X_fit = X
@@ -345,6 +365,41 @@ class TestRDBLearnEstimator(unittest.TestCase):
         )
         self.assertIsNone(clf.rdb_category_encoders_)
         self.assertIsNone(clf.task_category_encoders_)
+
+    def test_classifier_base10_hierarchical_when_c_gt_10(self):
+        base_model = MockTabPFNClassifier()
+        clf = RDBLearnClassifier(base_estimator=base_model)
+        y_multi = pd.Series(np.random.randint(0, 12, 100), name="target")
+        clf.fit(
+            self.X_train,
+            y_multi,
+            rdb=self.rdb,
+            key_mappings=self.key_mappings,
+            cutoff_time_column=self.cutoff_time_column,
+        )
+        self.assertTrue(clf.base10_hierarchical_)
+        self.assertEqual(clf.n_classes_, 12)
+        self.assertEqual(clf.base10_decomposer_.D, 2)
+        self.assertEqual(len(clf.digit_estimators_), 2)
+        proba = clf.predict_proba(self.X_test)
+        self.assertEqual(proba.shape, (20, 12))
+        np.testing.assert_allclose(proba.sum(axis=1), 1.0, rtol=1e-5)
+        preds = clf.predict(self.X_test)
+        self.assertEqual(len(preds), 20)
+
+    def test_classifier_single_head_when_c_le_10(self):
+        base_model = MockTabPFNClassifier()
+        clf = RDBLearnClassifier(base_estimator=base_model)
+        clf.fit(
+            self.X_train,
+            self.y_train_cls,
+            rdb=self.rdb,
+            key_mappings=self.key_mappings,
+            cutoff_time_column=self.cutoff_time_column,
+        )
+        self.assertFalse(getattr(clf, "base10_hierarchical_", True))
+        proba = clf.predict_proba(self.X_test)
+        self.assertEqual(proba.shape[1], 2)
 
 
 if __name__ == '__main__':

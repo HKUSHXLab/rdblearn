@@ -24,6 +24,53 @@ class Task(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
+
+def _primary_relbench_metric(
+    metric_names: List[str],
+    task_type: Optional[str] = None,
+) -> Optional[str]:
+    """Choose the primary RelBench metric for sweep evaluation.
+
+    RelBench exposes multiple metrics per task but does not designate one as primary.
+    Prefer ranking (MRR), then ROC-AUC for classification, then regression errors.
+    """
+    if not metric_names:
+        return None
+
+    def pick(*candidates: str) -> Optional[str]:
+        for candidate in candidates:
+            candidate_lower = candidate.lower()
+            for name in metric_names:
+                if name.lower() == candidate_lower:
+                    return name
+        return None
+
+    task_type_lower = (task_type or "").lower()
+    is_regression = "regression" in task_type_lower
+
+    if pick("mrr") is not None:
+        return pick("mrr")
+
+    if not is_regression:
+        roc = pick("roc_auc", "auc")
+        if roc is not None:
+            return roc
+        ap = pick("average_precision")
+        if ap is not None:
+            return ap
+        log_metric = pick("log_loss", "cross_entropy")
+        if log_metric is not None:
+            return log_metric
+
+    if is_regression:
+        for candidate in ("mae", "rmse", "r2"):
+            found = pick(candidate)
+            if found is not None:
+                return found
+
+    return metric_names[0]
+
+
 class RDBDataset:
     def __init__(self, rdb: RDB, tasks: List[Task]):
         self.rdb = rdb
@@ -144,10 +191,13 @@ class RDBDataset:
             
             key_mappings = {entity_col: f"{entity_table}.{pk}"}
             
-            # Extract metric name
             metric_name = None
             if rb_task.metrics:
-                metric_name = rb_task.metrics[0].__name__
+                metric_names = [m.__name__ for m in rb_task.metrics]
+                metric_name = _primary_relbench_metric(
+                    metric_names,
+                    task_type=task_type_val,
+                )
 
             metadata = TaskMetadata(
                 key_mappings=key_mappings,
