@@ -108,7 +108,7 @@ class TestRDBDataset(unittest.TestCase):
         self.assertEqual(task.metadata.target_col, "target")
         self.assertEqual(task.metadata.evaluation_metric, "roc_auc")
         
-        mock_adapter_cls.assert_called_with("dummy_dataset")
+        mock_adapter_cls.assert_called_with("dummy_dataset", for_task=None)
         mock_relbench_tasks.get_task_names.assert_called_with("dummy_dataset")
 
     @patch('relbench.tasks')
