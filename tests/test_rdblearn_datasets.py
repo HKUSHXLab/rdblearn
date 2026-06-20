@@ -16,7 +16,13 @@ except ImportError:
 
 import fastdfs.adapter
 
-from rdblearn.datasets import RDBDataset, Task, TaskMetadata, _primary_relbench_metric
+from rdblearn.datasets import (
+    RDBDataset,
+    Task,
+    TaskMetadata,
+    _primary_relbench_metric,
+    _hf_salt_label_columns_by_table,
+)
 
 class TestRDBDataset(unittest.TestCase):
     @patch('rdblearn.datasets.load_rdb')
@@ -274,6 +280,103 @@ class TestRDBDataset(unittest.TestCase):
         
         mock_adapter_cls.assert_called_with("dummy_4db")
         mock_adapter.load.assert_called_once()
+
+    def test_hf_salt_label_columns_by_table(self):
+        task_specs = {
+            "sales-office": ("sales", "SALESDOCUMENT", "SALESOFFICE", 1),
+            "sales-group": ("sales", "SALESDOCUMENT", "SALESGROUP", 1),
+            "item-plant": ("items", "ID", "PLANT", 1),
+            "item-incoterms": ("items", "ID", "ITEMINCOTERMSCLASSIFICATION", 1),
+        }
+        label_cols = _hf_salt_label_columns_by_table(task_specs)
+        self.assertEqual(
+            label_cols["sales"],
+            ["SALESOFFICE", "SALESGROUP"],
+        )
+        self.assertEqual(
+            label_cols["items"],
+            ["PLANT", "ITEMINCOTERMSCLASSIFICATION"],
+        )
+
+    @patch("datasets.load_dataset")
+    def test_from_hf_salt_strips_all_task_labels_from_rdb(self, mock_load_dataset):
+        sales_cols = [
+            "SALESDOCUMENT",
+            "CREATIONDATE",
+            "CREATIONTIME",
+            "SALESOFFICE",
+            "SALESGROUP",
+            "CUSTOMERPAYMENTTERMS",
+            "SHIPPINGCONDITION",
+            "INCOTERMSCLASSIFICATION",
+            "SALESDOCUMENTTYPE",
+        ]
+        items_cols = [
+            "SALESDOCUMENT",
+            "INCOTERMSCLASSIFICATION",
+            "PLANT",
+            "SHIPPINGPOINT",
+            "PRODUCT",
+            "SALESDOCUMENTITEM",
+        ]
+        customers_cols = ["CUSTOMER", "ADDRESSID"]
+        addresses_cols = ["ADDRESSID", "COUNTRY", "REGION"]
+
+        def make_row(cols, i):
+            row = {c: f"v{i}" for c in cols}
+            row["CREATIONDATE"] = "2024-01-01"
+            row["CREATIONTIME"] = "12:00:00"
+            return row
+
+        def make_split(rows):
+            return MagicMock(to_pandas=lambda: pd.DataFrame(rows))
+
+        sales_train = [make_row(sales_cols, i) for i in range(4)]
+        sales_test = [make_row(sales_cols, i + 4) for i in range(2)]
+        items_train = [make_row(items_cols, i) for i in range(4)]
+        items_test = [make_row(items_cols, i + 4) for i in range(2)]
+        customers = [{c: "c1" for c in customers_cols}]
+        addresses = [{c: "a1" for c in addresses_cols}]
+
+        def load_dataset_side_effect(_repo, table_name, split, **_kwargs):
+            if table_name == "salesdocuments":
+                return make_split(sales_train if split == "train" else sales_test)
+            if table_name == "salesdocument_items":
+                return make_split(items_train if split == "train" else items_test)
+            if table_name == "customers":
+                return make_split(customers)
+            if table_name == "addresses":
+                return make_split(addresses)
+            raise ValueError(f"unexpected table {table_name!r}")
+
+        mock_load_dataset.side_effect = load_dataset_side_effect
+
+        dataset = RDBDataset.from_hf_salt()
+
+        sales_df = dataset.rdb.get_table_dataframe("sales")
+        items_df = dataset.rdb.get_table_dataframe("items")
+        for col in [
+            "SALESOFFICE",
+            "SALESGROUP",
+            "CUSTOMERPAYMENTTERMS",
+            "SHIPPINGCONDITION",
+            "HEADERINCOTERMSCLASSIFICATION",
+        ]:
+            self.assertNotIn(col, sales_df.columns, f"{col} leaked into sales RDB")
+        for col in ["PLANT", "SHIPPINGPOINT", "ITEMINCOTERMSCLASSIFICATION"]:
+            self.assertNotIn(col, items_df.columns, f"{col} leaked into items RDB")
+
+        payterms_task = dataset.tasks["sales-payterms"]
+        self.assertIn("CUSTOMERPAYMENTTERMS", payterms_task.train_df.columns)
+        self.assertIn("CUSTOMERPAYMENTTERMS", payterms_task.test_df.columns)
+
+        office_task = dataset.tasks["sales-office"]
+        self.assertIn("SALESOFFICE", office_task.train_df.columns)
+        self.assertNotIn("CUSTOMERPAYMENTTERMS", sales_df.columns)
+
+    def test_from_hf_salt_for_task_validates_name(self):
+        with self.assertRaisesRegex(ValueError, "Unknown SALT task"):
+            RDBDataset.from_hf_salt(for_task="not-a-task")
 
 if __name__ == '__main__':
     unittest.main()

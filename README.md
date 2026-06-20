@@ -110,6 +110,7 @@ See `examples/` for more detailed usage.
 The central class for managing relational data and task-specific tables.
 
 - **`from_relbench(dataset_name: str) -> RDBDataset`**: Load a dataset from the RelBench benchmark.
+- **`from_hf_salt(for_task: Optional[str] = None) -> RDBDataset`**: Load Hugging Face [SALT](https://huggingface.co/datasets/sap-ai-research/SALT) with eight classification tasks. All task label columns are stripped from the shared RDB so DFS cannot leak labels across tasks; labels remain in each task's `train_df` / `test_df`.
 - **`from_4dbinfer(dataset_name: str) -> RDBDataset`**: Load a dataset from the 4DBInfer benchmark.
 - **`save(path: str)`**: Save the RDB and all associated tasks to disk.
 - **`load(path: str) -> RDBDataset`**: Load a previously saved dataset from disk.

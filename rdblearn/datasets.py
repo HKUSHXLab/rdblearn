@@ -22,6 +22,33 @@ def _hf_salt_use_local_only(explicit: Optional[bool]) -> bool:
         "HF_DATASETS_OFFLINE"
     )
 
+
+def _hf_salt_label_columns_by_table(
+    task_specs: Dict[str, tuple],
+) -> Dict[str, List[str]]:
+    """Collect every SALT task target column grouped by RDB table name."""
+    by_table: Dict[str, List[str]] = {"sales": [], "items": []}
+    seen: Dict[str, set] = {"sales": set(), "items": set()}
+    for _task_name, (table_name, _entity_col, target_col, _num_test) in task_specs.items():
+        if target_col not in seen[table_name]:
+            seen[table_name].add(target_col)
+            by_table[table_name].append(target_col)
+    return by_table
+
+
+_HF_SALT_TASK_NAMES = frozenset(
+    {
+        "sales-office",
+        "sales-group",
+        "sales-payterms",
+        "sales-shipcond",
+        "sales-incoterms",
+        "item-plant",
+        "item-shippoint",
+        "item-incoterms",
+    }
+)
+
 class TaskMetadata(BaseModel):
     key_mappings: Dict[str, str]
     target_col: str
@@ -355,10 +382,14 @@ class RDBDataset:
         HF SALT has no validation split; ``val_df`` is ``None`` for every task.
         Evaluation metric is MRR (matches the SALT CLI benchmark).
 
+        Every SALT task target column is removed from the shared RDB (``sales`` and
+        ``items`` tables) so Deep Feature Synthesis cannot use another task's label as
+        a feature. Labels remain available in each task's ``train_df`` / ``test_df``.
+
         Args:
-            for_task: If set (e.g. ``\"sales-payterms\"``), that task's target column is
-                removed from the corresponding RDB table so DFS cannot read the label.
-                Incoterms tasks also strip the counterpart label on the joined table.
+            for_task: Optional task name (e.g. ``\"sales-payterms\"``) for validation only.
+                All SALT task target columns are always removed from the shared RDB so DFS
+                cannot read labels from any task while fitting another.
             hf_local_only: If ``True``, load only from the local Hugging Face Datasets cache.
                 If ``None``, enabled when ``RDBLEARN_HF_SALT_LOCAL_ONLY`` or
                 ``HF_DATASETS_OFFLINE`` is truthy.
@@ -369,6 +400,11 @@ class RDBDataset:
             from datasets.utils.info_utils import VerificationMode
         except ImportError as e:
             raise ImportError("datasets must be installed to use from_hf_salt") from e
+
+        if for_task is not None and for_task not in _HF_SALT_TASK_NAMES:
+            raise ValueError(
+                f"Unknown SALT task {for_task!r}. Choose one of: {sorted(_HF_SALT_TASK_NAMES)}"
+            )
 
         local_only = _hf_salt_use_local_only(hf_local_only)
         _load_kw: Dict[str, object] = {}
@@ -487,24 +523,9 @@ class RDBDataset:
                 )
             )
 
-        sales_drop: List[str] = []
-        items_drop: List[str] = []
-        if for_task is not None:
-            if for_task not in task_specs:
-                raise ValueError(
-                    f"Unknown SALT task {for_task!r}. Choose one of: {list(task_specs.keys())}"
-                )
-            table_name, _entity_col, target_col, _n = task_specs[for_task]
-            if table_name == "sales":
-                sales_drop = [target_col]
-            else:
-                items_drop = [target_col]
-            if for_task == "item-incoterms":
-                sales_drop.append("HEADERINCOTERMSCLASSIFICATION")
-            elif for_task == "sales-incoterms":
-                items_drop.append("ITEMINCOTERMSCLASSIFICATION")
-        sales_rdb = sales.drop(columns=sales_drop, errors="ignore")
-        items_rdb = items.drop(columns=items_drop, errors="ignore")
+        label_cols = _hf_salt_label_columns_by_table(task_specs)
+        sales_rdb = sales.drop(columns=label_cols["sales"], errors="ignore")
+        items_rdb = items.drop(columns=label_cols["items"], errors="ignore")
 
         rdb = create_rdb(
             tables={
