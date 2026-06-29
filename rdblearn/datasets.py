@@ -5,7 +5,49 @@ import yaml
 import pandas as pd
 from pydantic import BaseModel
 from fastdfs import RDB, load_rdb
+from fastdfs.api import create_rdb
 from fastdfs.dataset.meta import RDBColumnDType
+
+
+def _env_flag_true(name: str) -> bool:
+    v = os.environ.get(name, "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _hf_salt_use_local_only(explicit: Optional[bool]) -> bool:
+    """Use Hugging Face Datasets cache only (no Hub/network) when True."""
+    if explicit is not None:
+        return explicit
+    return _env_flag_true("RDBLEARN_HF_SALT_LOCAL_ONLY") or _env_flag_true(
+        "HF_DATASETS_OFFLINE"
+    )
+
+
+def _hf_salt_label_columns_by_table(
+    task_specs: Dict[str, tuple],
+) -> Dict[str, List[str]]:
+    """Collect every SALT task target column grouped by RDB table name."""
+    by_table: Dict[str, List[str]] = {"sales": [], "items": []}
+    seen: Dict[str, set] = {"sales": set(), "items": set()}
+    for _task_name, (table_name, _entity_col, target_col, _num_test) in task_specs.items():
+        if target_col not in seen[table_name]:
+            seen[table_name].add(target_col)
+            by_table[table_name].append(target_col)
+    return by_table
+
+
+_HF_SALT_TASK_NAMES = frozenset(
+    {
+        "sales-office",
+        "sales-group",
+        "sales-payterms",
+        "sales-shipcond",
+        "sales-incoterms",
+        "item-plant",
+        "item-shippoint",
+        "item-incoterms",
+    }
+)
 
 class TaskMetadata(BaseModel):
     key_mappings: Dict[str, str]
@@ -23,6 +65,53 @@ class Task(BaseModel):
 
     class Config:
         arbitrary_types_allowed = True
+
+
+def _primary_relbench_metric(
+    metric_names: List[str],
+    task_type: Optional[str] = None,
+) -> Optional[str]:
+    """Choose the primary RelBench metric for sweep evaluation.
+
+    RelBench exposes multiple metrics per task but does not designate one as primary.
+    Prefer ranking (MRR), then ROC-AUC for classification, then regression errors.
+    """
+    if not metric_names:
+        return None
+
+    def pick(*candidates: str) -> Optional[str]:
+        for candidate in candidates:
+            candidate_lower = candidate.lower()
+            for name in metric_names:
+                if name.lower() == candidate_lower:
+                    return name
+        return None
+
+    task_type_lower = (task_type or "").lower()
+    is_regression = "regression" in task_type_lower
+
+    if pick("mrr") is not None:
+        return pick("mrr")
+
+    if not is_regression:
+        roc = pick("roc_auc", "auc")
+        if roc is not None:
+            return roc
+        ap = pick("average_precision")
+        if ap is not None:
+            return ap
+        log_metric = pick("log_loss", "cross_entropy")
+        if log_metric is not None:
+            return log_metric
+
+    if is_regression:
+        for candidate in ("mae", "rmse", "r2"):
+            found = pick(candidate)
+            if found is not None:
+                return found
+
+    return metric_names[0]
+
 
 class RDBDataset:
     def __init__(self, rdb: RDB, tasks: List[Task]):
@@ -106,7 +195,7 @@ class RDBDataset:
         return cls(rdb=rdb, tasks=tasks)
 
     @classmethod
-    def from_relbench(cls, dataset_name: str):
+    def from_relbench(cls, dataset_name: str, for_task: Optional[str] = None):
         try:
             import relbench.tasks
             from fastdfs.adapter import RelBenchAdapter
@@ -114,7 +203,7 @@ class RDBDataset:
             raise ImportError("relbench and fastdfs must be installed to use from_relbench") from e
 
         # Load RDB
-        adapter = RelBenchAdapter(dataset_name)
+        adapter = RelBenchAdapter(dataset_name, for_task=for_task)
         rdb = adapter.load()
 
         # Load Tasks
@@ -144,10 +233,13 @@ class RDBDataset:
             
             key_mappings = {entity_col: f"{entity_table}.{pk}"}
             
-            # Extract metric name
             metric_name = None
             if rb_task.metrics:
-                metric_name = rb_task.metrics[0].__name__
+                metric_names = [m.__name__ for m in rb_task.metrics]
+                metric_name = _primary_relbench_metric(
+                    metric_names,
+                    task_type=task_type_val,
+                )
 
             metadata = TaskMetadata(
                 key_mappings=key_mappings,
@@ -278,3 +370,210 @@ class RDBDataset:
             
         return cls(rdb=rdb, tasks=tasks)
 
+    @classmethod
+    def from_hf_salt(
+        cls,
+        for_task: Optional[str] = None,
+        *,
+        hf_local_only: Optional[bool] = None,
+    ):
+        """Load Hugging Face SALT as an RDBDataset with train/test classification tasks.
+
+        HF SALT has no validation split; ``val_df`` is ``None`` for every task.
+        Evaluation metric is MRR (matches the SALT CLI benchmark).
+
+        Every SALT task target column is removed from the shared RDB (``sales`` and
+        ``items`` tables) so Deep Feature Synthesis cannot use another task's label as
+        a feature. Labels remain available in each task's ``train_df`` / ``test_df``.
+
+        Args:
+            for_task: Optional task name (e.g. ``\"sales-payterms\"``) for validation only.
+                All SALT task target columns are always removed from the shared RDB so DFS
+                cannot read labels from any task while fitting another.
+            hf_local_only: If ``True``, load only from the local Hugging Face Datasets cache.
+                If ``None``, enabled when ``RDBLEARN_HF_SALT_LOCAL_ONLY`` or
+                ``HF_DATASETS_OFFLINE`` is truthy.
+        """
+        try:
+            from datasets import DownloadMode, load_dataset
+            from datasets.download.download_config import DownloadConfig
+            from datasets.utils.info_utils import VerificationMode
+        except ImportError as e:
+            raise ImportError("datasets must be installed to use from_hf_salt") from e
+
+        if for_task is not None and for_task not in _HF_SALT_TASK_NAMES:
+            raise ValueError(
+                f"Unknown SALT task {for_task!r}. Choose one of: {sorted(_HF_SALT_TASK_NAMES)}"
+            )
+
+        local_only = _hf_salt_use_local_only(hf_local_only)
+        _load_kw: Dict[str, object] = {}
+        if local_only:
+            _load_kw = {
+                "download_config": DownloadConfig(local_files_only=True),
+                "download_mode": DownloadMode.REUSE_DATASET_IF_EXISTS,
+                "verification_mode": VerificationMode.NO_CHECKS,
+            }
+
+        def get_df(table_name: str, split: str = "train") -> pd.DataFrame:
+            return load_dataset(
+                "sap-ai-research/SALT",
+                table_name,
+                split=split,
+                **_load_kw,
+            ).to_pandas()
+
+        sales_train = get_df("salesdocuments", "train")
+        sales_test = get_df("salesdocuments", "test")
+        items_train = get_df("salesdocument_items", "train")
+        items_test = get_df("salesdocument_items", "test")
+        customers = get_df("customers", "train")
+        addresses = get_df("addresses", "train")
+
+        sales = pd.concat([sales_train, sales_test], axis=0, ignore_index=True)
+        items = pd.concat([items_train, items_test], axis=0, ignore_index=True)
+
+        date = sales["CREATIONDATE"].astype(str)
+        time = sales["CREATIONTIME"].astype(str)
+        sales["CREATIONDATETIME"] = pd.to_datetime(date + " " + time)
+        del sales["CREATIONDATE"]
+        del sales["CREATIONTIME"]
+
+        items = pd.merge(
+            left=items,
+            right=sales[["SALESDOCUMENT", "CREATIONDATETIME"]],
+            how="left",
+            on="SALESDOCUMENT",
+        )
+
+        for df in [sales, items, customers, addresses]:
+            if "__index_level_0__" in df.columns:
+                del df["__index_level_0__"]
+        customers = customers.drop_duplicates(subset=["CUSTOMER"], keep="first").copy()
+        addresses = addresses.drop_duplicates(subset=["ADDRESSID"], keep="first").copy()
+
+        sales = sales.rename(
+            columns={"INCOTERMSCLASSIFICATION": "HEADERINCOTERMSCLASSIFICATION"}
+        )
+        items = items.rename(
+            columns={"INCOTERMSCLASSIFICATION": "ITEMINCOTERMSCLASSIFICATION"}
+        )
+        items["ID"] = range(len(items))
+        items = items.drop(
+            columns=["SHIPTOPARTY", "BILLTOPARTY", "PAYERPARTY"],
+            errors="ignore",
+        )
+
+        sales_num_test = len(sales_test)
+        items_num_test = len(items_test)
+        tasks = []
+        task_specs = {
+            "sales-office": ("sales", "SALESDOCUMENT", "SALESOFFICE", sales_num_test),
+            "sales-group": ("sales", "SALESDOCUMENT", "SALESGROUP", sales_num_test),
+            "sales-payterms": (
+                "sales",
+                "SALESDOCUMENT",
+                "CUSTOMERPAYMENTTERMS",
+                sales_num_test,
+            ),
+            "sales-shipcond": (
+                "sales",
+                "SALESDOCUMENT",
+                "SHIPPINGCONDITION",
+                sales_num_test,
+            ),
+            "sales-incoterms": (
+                "sales",
+                "SALESDOCUMENT",
+                "HEADERINCOTERMSCLASSIFICATION",
+                sales_num_test,
+            ),
+            "item-plant": ("items", "ID", "PLANT", items_num_test),
+            "item-shippoint": ("items", "ID", "SHIPPINGPOINT", items_num_test),
+            "item-incoterms": (
+                "items",
+                "ID",
+                "ITEMINCOTERMSCLASSIFICATION",
+                items_num_test,
+            ),
+        }
+
+        for task_name, (table_name, entity_col, target_col, num_test) in task_specs.items():
+            table_df = sales if table_name == "sales" else items
+            train_df = table_df.iloc[:-num_test].copy()
+            test_df = table_df.iloc[-num_test:].copy()
+
+            train_df = train_df[pd.notna(train_df[target_col])].copy()
+            test_df = test_df[pd.notna(test_df[target_col])].copy()
+
+            metadata = TaskMetadata(
+                key_mappings={entity_col: f"{table_name}.{entity_col}"},
+                target_col=target_col,
+                time_col="CREATIONDATETIME",
+                task_type="classification",
+                evaluation_metric="mrr",
+            )
+            tasks.append(
+                Task(
+                    name=task_name,
+                    train_df=train_df,
+                    test_df=test_df,
+                    val_df=None,
+                    metadata=metadata,
+                )
+            )
+
+        label_cols = _hf_salt_label_columns_by_table(task_specs)
+        sales_rdb = sales.drop(columns=label_cols["sales"], errors="ignore")
+        items_rdb = items.drop(columns=label_cols["items"], errors="ignore")
+
+        rdb = create_rdb(
+            tables={
+                "sales": sales_rdb,
+                "items": items_rdb,
+                "customers": customers,
+                "addresses": addresses,
+            },
+            name="hf-salt",
+            primary_keys={
+                "sales": "SALESDOCUMENT",
+                "items": "ID",
+                "customers": "CUSTOMER",
+                "addresses": "ADDRESSID",
+            },
+            foreign_keys=[
+                ("items", "SALESDOCUMENT", "sales", "SALESDOCUMENT"),
+                ("items", "SOLDTOPARTY", "customers", "CUSTOMER"),
+                ("customers", "ADDRESSID", "addresses", "ADDRESSID"),
+            ],
+            time_columns={
+                "sales": "CREATIONDATETIME",
+                "items": "CREATIONDATETIME",
+            },
+            type_hints={
+                "addresses": {
+                    "COUNTRY": "category",
+                    "REGION": "category",
+                },
+                "items": {
+                    "PRODUCT": "text",
+                    "SALESDOCUMENTITEM": "category",
+                    "SALESDOCUMENTITEMCATEGORY": "category",
+                    "PLANT": "category",
+                    "SHIPPINGPOINT": "category",
+                    "ITEMINCOTERMSCLASSIFICATION": "category",
+                },
+                "sales": {
+                    "SALESDOCUMENTTYPE": "category",
+                    "SALESORGANIZATION": "category",
+                    "BILLINGCOMPANYCODE": "category",
+                    "TRANSACTIONCURRENCY": "category",
+                    "SALESOFFICE": "category",
+                    "CUSTOMERPAYMENTTERMS": "category",
+                    "SHIPPINGCONDITION": "category",
+                    "HEADERINCOTERMSCLASSIFICATION": "category",
+                },
+            },
+        )
+
+        return cls(rdb=rdb, tasks=tasks)

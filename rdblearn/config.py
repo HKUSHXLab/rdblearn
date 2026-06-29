@@ -28,13 +28,16 @@ class RDBLearnConfig(BaseModel):
     stratified_sampling: bool = False  # Ignored for RDBLearnRegressor
     
     # Target History Augmentation
-    enable_target_augmentation: bool = True
+    enable_target_augmentation: bool = False
     
     # Prediction Configuration
     predict_batch_size: int = 5000
 
     # Temporal Difference Configuration (post-DFS transformation)
     temporal_diff: Optional[TemporalDiffConfig] = TemporalDiffConfig()
+
+    # Label-encode schema category columns (and object/category task columns) to float before DFS.
+    encode_categorical_as_float: bool = False
 
     class Config:
         arbitrary_types_allowed = True

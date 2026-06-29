@@ -52,7 +52,7 @@ dependencies = [
     "hyperopt",
     "autogluon.tabular>=1.5.0",
     "tabpfn>=6.3.0",
-    "relbench==1.1.0",
+    "relbench==2.1.2",
     "wandb>=0.24.0",
     "fastdfs==0.2.1",
 ]

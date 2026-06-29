@@ -110,6 +110,7 @@ See `examples/` for more detailed usage.
 The central class for managing relational data and task-specific tables.
 
 - **`from_relbench(dataset_name: str) -> RDBDataset`**: Load a dataset from the RelBench benchmark.
+- **`from_hf_salt(for_task: Optional[str] = None) -> RDBDataset`**: Load Hugging Face [SALT](https://huggingface.co/datasets/sap-ai-research/SALT) with eight classification tasks. All task label columns are stripped from the shared RDB so DFS cannot leak labels across tasks; labels remain in each task's `train_df` / `test_df`.
 - **`from_4dbinfer(dataset_name: str) -> RDBDataset`**: Load a dataset from the 4DBInfer benchmark.
 - **`save(path: str)`**: Save the RDB and all associated tasks to disk.
 - **`load(path: str) -> RDBDataset`**: Load a previously saved dataset from disk.
@@ -136,6 +137,8 @@ Scikit-learn compatible estimators for relational learning.
     - `X`: Test features.
     - `rdb`: Optional RDB context (uses the one from `fit` if not provided).
 - **`predict_proba(X, rdb=None, **kwargs)`**: (Classifier only) Predict class probabilities.
+
+**Multiclass (>10 classes):** For classification tasks with more than 10 training classes, `RDBLearnClassifier` automatically uses **base-10-hierarchical** inference: the label space is decomposed into decimal digit heads (each head has at most 10 classes, compatible with TabPFN), then digit probabilities are fused into a full `(n_samples, C)` matrix. No extra configuration is required. Tasks with **C ≤ 10** use a single model on the original target.
 
 ### `TaskMetadata`
 Data structure containing task-specific information.
