@@ -45,7 +45,7 @@ Or install from source:
 ```bash
 git clone https://github.com/HKUSHXLab/rdblearn.git
 cd rdblearn
-git checkout v0.1.2
+git checkout v1.1
 pip install -e .
 # optional GPU wheel:
 pip install -r requirements-gpu.txt

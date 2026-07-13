@@ -23,9 +23,13 @@ class RDBLearnEstimator(BaseEstimator):
     def __init__(
         self, 
         base_estimator, 
-        config: Optional[Union[RDBLearnConfig, dict]] = None
+        config: Optional[Union[RDBLearnConfig, dict]] = None,
+        dfs_cache: Optional[Any] = None,
     ):
         self.base_estimator = base_estimator
+        self.dfs_cache_ = dfs_cache
+        self._dfs_cache_task_id_: Optional[str] = None
+        self._dfs_cache_split_: Optional[str] = None
 
         if isinstance(config, RDBLearnConfig):
             self.config = config
@@ -48,6 +52,55 @@ class RDBLearnEstimator(BaseEstimator):
         self.train_cutoff_time_column_ = None
         self.rdb_category_encoders_ = None
         self.task_category_encoders_ = None
+
+    def use_dfs_cache(self, task_id: str, split: str) -> None:
+        """Point subsequent DFS calls at a precomputed feature cache entry."""
+        self._dfs_cache_task_id_ = task_id
+        self._dfs_cache_split_ = split
+
+    def _dfs_join_columns(
+        self,
+        key_mappings: Dict[str, str],
+        cutoff_time_column: Optional[str],
+    ) -> list[str]:
+        cols = list(key_mappings.keys())
+        if cutoff_time_column and cutoff_time_column not in cols:
+            cols.append(cutoff_time_column)
+        return cols
+
+    def _compute_dfs_features(
+        self,
+        rdb: RDB,
+        X: pd.DataFrame,
+        key_mappings: Dict[str, str],
+        cutoff_time_column: Optional[str],
+        dfs_config: DFSConfig,
+    ) -> pd.DataFrame:
+        if (
+            self.dfs_cache_ is not None
+            and self._dfs_cache_split_ is not None
+            and self._dfs_cache_task_id_ is not None
+        ):
+            cached = self.dfs_cache_.lookup(
+                self._dfs_cache_split_,
+                X,
+                join_cols=self._dfs_join_columns(key_mappings, cutoff_time_column),
+            )
+            if cached is not None:
+                return cached
+
+        logger.info(
+            "Computing DFS features live ({} / {})",
+            self._dfs_cache_task_id_ or "no-task",
+            self._dfs_cache_split_ or "no-split",
+        )
+        return fastdfs.compute_dfs_features(
+            rdb,
+            X,
+            key_mappings=key_mappings,
+            cutoff_time_column=cutoff_time_column,
+            config=dfs_config,
+        )
 
     def _ensure_keys_are_strings(self, X: pd.DataFrame, key_mappings: Dict[str, str]) -> None:
         """Modifies X in place, using safe_convert_to_string for consistency with RDB."""
@@ -100,6 +153,11 @@ class RDBLearnEstimator(BaseEstimator):
             out[col] = encode_series_with_label_encoder(out[col], le)
         return out
 
+    def _get_rng(self) -> Optional[np.random.Generator]:
+        if self.config.random_seed is None:
+            return None
+        return np.random.default_rng(self.config.random_seed)
+
     def _downsample(
         self,
         data: pd.DataFrame,
@@ -116,10 +174,14 @@ class RDBLearnEstimator(BaseEstimator):
         
         X = data.drop(columns=[target_column])
         y = data[target_column].values
+        rng = self._get_rng()
 
         if task_type == "regression":
-            idx = np.random.choice(len(X), max_samples, replace=False)
-            return data.iloc[idx].reset_index(drop=True)
+            if rng is not None:
+                idx = rng.choice(len(X), max_samples, replace=False)
+            else:
+                idx = np.random.choice(len(X), max_samples, replace=False)
+            return data.iloc[idx]
 
         # Classification
         if not stratified_sampling:
@@ -128,7 +190,10 @@ class RDBLearnEstimator(BaseEstimator):
             for label in unique_labels:
                 class_indices = np.where(y == label)[0]
                 if len(class_indices) > 0:
-                    selected_idx = np.random.choice(class_indices, 1)[0]
+                    if rng is not None:
+                        selected_idx = rng.choice(class_indices, 1)[0]
+                    else:
+                        selected_idx = np.random.choice(class_indices, 1)[0]
                     selected_indices.append(selected_idx)
 
             remaining_samples = max_samples - len(selected_indices)
@@ -138,16 +203,23 @@ class RDBLearnEstimator(BaseEstimator):
                 eligible_indices = np.where(mask)[0]
 
                 if len(eligible_indices) > 0:
-                    additional_indices = np.random.choice(
-                        eligible_indices,
-                        min(remaining_samples, len(eligible_indices)),
-                        replace=False
-                    )
+                    n_pick = min(remaining_samples, len(eligible_indices))
+                    if rng is not None:
+                        additional_indices = rng.choice(
+                            eligible_indices, n_pick, replace=False
+                        )
+                    else:
+                        additional_indices = np.random.choice(
+                            eligible_indices, n_pick, replace=False
+                        )
                     selected_indices.extend(additional_indices)
 
-            np.random.shuffle(selected_indices)
+            if rng is not None:
+                selected_indices = list(rng.permutation(selected_indices))
+            else:
+                np.random.shuffle(selected_indices)
             idx = np.array(selected_indices)
-            return data.iloc[idx].reset_index(drop=True)
+            return data.iloc[idx]
 
         else:
             unique_labels, label_counts = np.unique(y, return_counts=True)
@@ -165,7 +237,14 @@ class RDBLearnEstimator(BaseEstimator):
                 if len(class_indices) <= samples_per_class:
                     balanced_indices.extend(class_indices)
                 else:
-                    sampled_indices = np.random.choice(class_indices, samples_per_class, replace=False)
+                    if rng is not None:
+                        sampled_indices = rng.choice(
+                            class_indices, samples_per_class, replace=False
+                        )
+                    else:
+                        sampled_indices = np.random.choice(
+                            class_indices, samples_per_class, replace=False
+                        )
                     balanced_indices.extend(sampled_indices)
                     mask = np.ones(len(class_indices), dtype=bool)
                     mask[np.isin(class_indices, sampled_indices)] = False
@@ -173,17 +252,24 @@ class RDBLearnEstimator(BaseEstimator):
 
             samples_needed = max_samples - len(balanced_indices)
             if samples_needed > 0 and len(remaining_indices) > 0:
-                additional_samples = np.random.choice(
-                    remaining_indices,
-                    min(samples_needed, len(remaining_indices)),
-                    replace=False
-                )
+                n_pick = min(samples_needed, len(remaining_indices))
+                if rng is not None:
+                    additional_samples = rng.choice(
+                        remaining_indices, n_pick, replace=False
+                    )
+                else:
+                    additional_samples = np.random.choice(
+                        remaining_indices, n_pick, replace=False
+                    )
                 balanced_indices.extend(additional_samples)
 
-            np.random.shuffle(balanced_indices)
+            if rng is not None:
+                balanced_indices = list(rng.permutation(balanced_indices))
+            else:
+                np.random.shuffle(balanced_indices)
             balanced_indices = balanced_indices[:max_samples]
             idx = np.array(balanced_indices)
-            return data.iloc[idx].reset_index(drop=True)
+            return data.iloc[idx]
 
     def _prepare_rdb(self, rdb: RDB) -> RDB:
         # Augment with target history if enabled and available
@@ -285,12 +371,12 @@ class RDBLearnEstimator(BaseEstimator):
         logger.info("Computing DFS features...")
         dfs_config = self.config.dfs or DFSConfig()
         
-        X_dfs = fastdfs.compute_dfs_features(
+        X_dfs = self._compute_dfs_features(
             self.rdb_,
             X,
             key_mappings=key_mappings,
             cutoff_time_column=cutoff_time_column,
-            config=dfs_config
+            dfs_config=dfs_config,
         )
         logger.debug(f"DFS features: {X_dfs.columns.tolist()}")
 
@@ -328,12 +414,12 @@ class RDBLearnEstimator(BaseEstimator):
 
         logger.info("Computing DFS features...")
         dfs_config = self.config.dfs or DFSConfig()
-        X_dfs = fastdfs.compute_dfs_features(
+        X_dfs = self._compute_dfs_features(
             selected_rdb,
             X,
             key_mappings=self.key_mappings_,
             cutoff_time_column=self.cutoff_time_column_,
-            config=dfs_config,
+            dfs_config=dfs_config,
         )
         logger.info("Preprocessing augmented features ...")
         return self.preprocessor_.transform(X_dfs)
@@ -359,12 +445,12 @@ class RDBLearnEstimator(BaseEstimator):
         
         dfs_config = self.config.dfs or DFSConfig()
         
-        X_dfs = fastdfs.compute_dfs_features(
-            selected_rdb, 
-            X, 
-            key_mappings=self.key_mappings_, 
-            cutoff_time_column=self.cutoff_time_column_, 
-            config=dfs_config
+        X_dfs = self._compute_dfs_features(
+            selected_rdb,
+            X,
+            key_mappings=self.key_mappings_,
+            cutoff_time_column=self.cutoff_time_column_,
+            dfs_config=dfs_config,
         )
 
 

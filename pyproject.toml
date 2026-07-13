@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rdblearn"
-version = "0.1.2"
+version = "1.1"
 description = "Relational Database Learning with Foundation Models"
 readme = "README.md"
 license = {text = "MIT"}
@@ -54,7 +54,7 @@ dependencies = [
     "tabpfn>=6.3.0",
     "relbench==2.1.2",
     "wandb>=0.24.0",
-    "fastdfs==0.2.1",
+    "fastdfs==1.1",
 ]
 
 [project.optional-dependencies]
