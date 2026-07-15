@@ -164,6 +164,25 @@ Data structure containing task-specific information.
 
 **Note**: You must install LimiX separately and provide an initialized `LimiXPredictor` to these wrappers.
 
+### TabFM Integration
+`rdblearn.utils` also provides wrappers for Google's **TabFM 1.0.0** (`google/tabfm-1.0.0-pytorch`), a 1.6B-parameter in-context tabular foundation model.
+
+- **`TabFMWrapperClassifier(checkpoint_path=None, device="cuda", n_estimators=8, max_num_features=None, chunk_size="auto", dtype="float32")`**: Wrapper for classification tasks (max 10 classes, an architectural TabFM limit).
+    - `checkpoint_path`: local directory holding the `classification/` + `regression/` subfolders of the HF repo; `None` downloads from Hugging Face.
+    - `chunk_size="auto"`: enables TabFM's activation chunking (off by default in `tabfm==1.0.0`) with a constant cells-per-chunk budget, so wide DFS feature sets fit on 32 GB GPUs without dropping features.
+    - `dtype="bfloat16"`: halves activation memory via an fp32↔bf16 IO adapter (bf16 is TabFM's upstream design dtype); use for very wide/deep feature sets.
+    - `fit(X, y)` / `predict(X)` / `predict_proba(X)`: standard scikit-learn contract.
+- **`TabFMWrapperRegressor(...)`**: same options, for regression. Note TabFM's regression head emits a single scalar per row — unlike TabPFN there is no predictive distribution (no median/quantiles).
+
+Install TabFM without disturbing the pinned torch build:
+
+```bash
+pip install "jaxtyping<0.3" "typeguard<3" absl-py safetensors
+pip install tabfm --no-deps
+```
+
+The HF repo ships `model.safetensors` only, while the `tabfm==1.0.0` wheel loads `pytorch_model.bin`; the wrapper converts once automatically on first use. See `examples/rdblearn_tabfm_example.py`.
+
 ---
 
 ## 📜 License
