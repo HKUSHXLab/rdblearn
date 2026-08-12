@@ -2,19 +2,24 @@
 
 > Relational Database Learning with Foundation Models.
 
----
-
-## 📑 Table of Contents
-
-- [Introduction](#-introduction)
-- [Installation](#️-installation)
-- [Usage](#-usage)
-- [Core API Reference](#-core-api-reference)
-- [License](#-license)
+📈 Latest benchmark results (**RDBLearn v1.1**) are reported in [*Parameter-Free Encoders Remain Viable for RDB Foundation Models*](https://arxiv.org/abs/2607.05476).
 
 ---
 
-## 🎯 Introduction
+## Table of Contents
+
+- [Introduction](#introduction)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Core API Reference](#core-api-reference)
+- [Papers & Configurations](#papers--configurations)
+- [License](#license)
+
+---
+
+<a id="introduction"></a>
+
+## Introduction 🎯
 
 **RDBLearn** is a framework designed to apply single-table foundation models to multi-table relational database tasks. It automates the process of flattening relational data into a single feature-rich table using Deep Feature Synthesis (DFS) and then leverages powerful single-table estimators (like TabPFN) for prediction.
 
@@ -26,7 +31,10 @@
 
 ---
 
-## ⚙️ Installation
+<a id="installation"></a>
+
+## Installation ⚙️
+
 
 Requires **Python 3.12**.
 
@@ -53,7 +61,9 @@ pip install -r requirements-gpu.txt
 
 ---
 
-## 🚀 Usage
+<a id="usage"></a>
+
+## Usage 🚀
 
 ### Basic Example (RelBench rel-avito)
 
@@ -103,6 +113,8 @@ predictions = reg.predict(X=X_test)
 See `examples/` for more detailed usage.
 
 ---
+
+<a id="core-api-reference"></a>
 
 ## Core API Reference
 
@@ -185,6 +197,52 @@ The HF repo ships `model.safetensors` only, while the `tabfm==1.0.0` wheel loads
 
 ---
 
-## 📜 License
+<a id="papers--configurations"></a>
+
+## Papers & Configurations 📚
+
+The continual development of RDBLearn has contributed to the following papers. Experiment configurations used in each paper are documented in **[docs/PAPER_CONFIGS.md](docs/PAPER_CONFIGS.md)**.
+
+| Paper | Venue | Configs |
+| --- | --- | --- |
+| [No Need to Train Your RDB Foundation Model](https://arxiv.org/abs/2602.13697) | ICML 2026 | [PAPER_CONFIGS.md §1](docs/PAPER_CONFIGS.md#1-icml-2026--no-need-to-train-your-rdb-foundation-model) |
+| [RDBLearn: Simple In-Context Prediction Over Relational Databases](https://arxiv.org/abs/2602.18495) | arXiv | [PAPER_CONFIGS.md §2](docs/PAPER_CONFIGS.md#2-package-paper--rdblearn-simple-in-context-prediction-over-relational-databases) |
+| [Parameter-Free Encoders Remain Viable for RDB Foundation Models](https://arxiv.org/abs/2607.05476) | 2nd ICML Workshop on Foundation Models for Structured Data, 2026 | [PAPER_CONFIGS.md §3](docs/PAPER_CONFIGS.md#3-icml-workshop-2026--parameter-free-encoders-remain-viable-for-rdb-foundation-models) |
+
+### BibTeX
+
+```bibtex
+@inproceedings{xu2026no,
+title={No Need to Train Your {RDB} Foundation Model},
+author={Linjie Xu and Yanlin Zhang and Quan Gan and Minjie Wang and David Wipf},
+booktitle={Forty-third International Conference on Machine Learning},
+year={2026},
+url={https://openreview.net/forum?id=hrtEiSftwk}
+}
+
+@misc{zhang2026rdblearn,
+  title         = {{RDBLearn}: Simple In-Context Prediction Over Relational Databases},
+  author        = {Zhang, Yanlin and Xu, Linjie and Gan, Quan and Wipf, David and Wang, Minjie},
+  year          = {2026},
+  eprint        = {2602.18495},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.DB},
+  url           = {https://arxiv.org/abs/2602.18495}
+}
+
+@inproceedings{xu2026parameterfree,
+title={Parameter-Free Encoders Remain Viable for {RDB} Foundation Models},
+author={Linjie Xu and David Wipf},
+booktitle={2nd ICML Workshop on Foundation Models for Structured Data},
+year={2026},
+url={https://openreview.net/forum?id=wRWaegFYMx}
+}
+```
+
+---
+
+<a id="license"></a>
+
+## License 📜
 
 This project is licensed under the MIT License.
