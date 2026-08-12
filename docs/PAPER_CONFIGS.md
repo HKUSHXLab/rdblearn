@@ -8,6 +8,19 @@ This page documents the RDBLearn settings used in the published papers. Config k
 | [RDBLearn: Simple In-Context Prediction Over Relational Databases](https://arxiv.org/abs/2602.18495) | arXiv (package / toolkit paper) | Companion documentation for the RDBLearn toolkit |
 | [Parameter-Free Encoders Remain Viable for RDB Foundation Models](https://arxiv.org/abs/2607.05476) | 2nd ICML Workshop on Foundation Models for Structured Data, 2026 | RDBLearn **v1.1** ([release](https://github.com/HKUSHXLab/rdblearn/releases/tag/v1.1)) |
 
+## Quick comparison
+
+| | ICML 2026 (v0.1.2) | Package paper (v0.1.2) | Workshop 2026 (v1.1) |
+| --- | --- | --- | --- |
+| Depth $H$ | $\{2, 3\}$ | $\{2, 3, 4\}$  | $\{2, 3, 4\}$ |
+| Aggregators | Fixed original set | Package defaults (DFS primitives) | Original **vs** expanded (val); expanded default if no val |
+| Base models | TabPFN-v2 / v2.5, LimiX | TabPFN-v2 / v2.5, LimiX | + TabICL-v2, TabPFN-v3 |
+| Train samples | ≤ 10k | ≤ 10k | ≤ 10k |
+| Temporal diffs | On | On | On |
+| Text features | Off | Off | Off |
+
+**Note:** This table only shows configuration differences. Other improvements, such as faster feature merging developed in v1.1, are described in documents and papers.
+
 ---
 
 ## 1. ICML 2026 — *No Need to Train Your RDB Foundation Model*
@@ -176,16 +189,3 @@ config = {
     },
 }
 ```
-
----
-
-## Quick comparison
-
-| | ICML 2026 | Package paper | Workshop 2026 (v1.1) |
-| --- | --- | --- | --- |
-| Depth $H$ | $\{2, 3\}$ | $\{2, 3, 4\}$  | $\{2, 3, 4\}$ |
-| Aggregators | Fixed original set | Package defaults (DFS primitives) | Original **vs** expanded (val); expanded default if no val |
-| Base models | TabPFN-v2 / v2.5, LimiX | TabPFN-v2 / v2.5, LimiX | + TabICL-v2, TabPFN-v3 |
-| Train samples | ≤ 10k | ≤ 10k | ≤ 10k |
-| Temporal diffs | On | On | On |
-| Text features | Off | Off | Off |
