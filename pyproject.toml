@@ -54,7 +54,7 @@ dependencies = [
     "tabpfn>=6.3.0",
     "relbench==2.1.2",
     "wandb>=0.24.0",
-    "fastdfs==0.2.1",
+    "fastdfs==1.3",
 ]
 
 [project.optional-dependencies]
