@@ -234,8 +234,8 @@ class TestRDBLearnEstimator(unittest.TestCase):
             cutoff_time_column=self.cutoff_time_column
         )
 
-        self.assertIsNotNone(clf.preprocessor_.temporal_transformer)
-        self.assertTrue(clf.preprocessor_.temporal_transformer.is_fitted_)
+        temporal = clf.preprocessor_.pipeline.named_steps["temporal"]
+        self.assertTrue(len(temporal.timestamp_columns_) > 0)
 
         # Verify that expected diff columns are present after fitting
         x_fit_cols = clf.base_estimator.X_fit.columns
