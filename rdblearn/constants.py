@@ -2,7 +2,10 @@ TABPFN_DEFAULT_CONFIG = {
     "n_estimators": 8,
     "ignore_pretraining_limits": True,  # Allow datasets larger than 10K samples
     "device": "cuda",
-    "n_preprocessing_jobs": -1
+    "n_preprocessing_jobs": -1,
+    # Keep the training context's key/value cache from `fit` so `predict*` calls only run the
+    # test rows; TabPFN's default "fit_preprocessors" re-encodes the training rows on every call.
+    "fit_mode": "fit_with_cache",
 }
 
 RDBLEARN_DEFAULT_CONFIG = {
