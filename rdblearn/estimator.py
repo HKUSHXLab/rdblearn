@@ -6,6 +6,7 @@ from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin, clone
 from sklearn.preprocessing import LabelEncoder
 import fastdfs
 from fastdfs import RDB, DFSConfig
+from fastdfs.dfs import DFSSession
 from fastdfs.utils.type_utils import safe_convert_to_string
 from fastdfs.transform import (
     RDBTransformWrapper, RDBTransformPipeline, HandleDummyTable, 
@@ -48,6 +49,43 @@ class RDBLearnEstimator(BaseEstimator):
         self.train_cutoff_time_column_ = None
         self.rdb_category_encoders_ = None
         self.task_category_encoders_ = None
+        self.dfs_session_ = None
+
+    def __getstate__(self):
+        # The DFS session holds a DuckDB connection, which cannot be pickled; it is
+        # reopened on the next DFS call.
+        state = self.__dict__.copy()
+        state["dfs_session_"] = None
+        return state
+
+    def _dfs_config(self) -> DFSConfig:
+        return self.config.dfs or DFSConfig()
+
+    def _close_dfs_session(self) -> None:
+        if getattr(self, "dfs_session_", None) is not None:
+            self.dfs_session_.close()
+            self.dfs_session_ = None
+
+    def _compute_dfs(self, X: pd.DataFrame, rdb: Optional[RDB] = None) -> pd.DataFrame:
+        """DFS features for ``X`` against ``rdb`` (default: the fitted ``rdb_``).
+
+        Calls against ``rdb_`` share one ``DFSSession``, so the feature plan and the
+        DuckDB copy of the RDB are built once in ``fit`` and reused by every predict call.
+        """
+        config = self._dfs_config()
+        if rdb is not None or config.engine != "dfs2sql":
+            return fastdfs.compute_dfs_features(
+                rdb if rdb is not None else self.rdb_,
+                X,
+                key_mappings=self.key_mappings_,
+                cutoff_time_column=self.cutoff_time_column_,
+                config=config,
+            )
+        if getattr(self, "dfs_session_", None) is None:
+            self.dfs_session_ = DFSSession(
+                self.rdb_, self.key_mappings_, self.cutoff_time_column_, config
+            )
+        return self.dfs_session_.compute(X)
 
     def _ensure_keys_are_strings(self, X: pd.DataFrame, key_mappings: Dict[str, str]) -> None:
         """Modifies X in place, using safe_convert_to_string for consistency with RDB."""
@@ -230,11 +268,28 @@ class RDBLearnEstimator(BaseEstimator):
         cutoff_time_column: Optional[str] = None,
         **kwargs
     ):
+        X, y = self._fit_rdb(X, y, rdb, key_mappings, cutoff_time_column)
+        logger.info("Computing DFS features...")
+        X_dfs = self._compute_dfs(X)
+        logger.debug(f"DFS features: {X_dfs.columns.tolist()}")
+        return self._fit_from_dfs(X_dfs, y, **kwargs)
+
+    def _fit_rdb(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        rdb: RDB,
+        key_mappings: Dict[str, str],
+        cutoff_time_column: Optional[str],
+    ):
+        """Fit everything before DFS (target history, RDB transforms, downsampling, task
+        encoders) and return the training rows ready for ``_compute_dfs``."""
         # 0. Copy and ensure keys are string
         X = X.copy()
         self._ensure_keys_are_strings(X, key_mappings)
         self.key_mappings_ = key_mappings
         self.cutoff_time_column_ = cutoff_time_column
+        self._close_dfs_session()
         
         # 1. Setup Target History Augmentation (Using FULL X, y)
         if self.config.enable_target_augmentation:
@@ -280,26 +335,15 @@ class RDBLearnEstimator(BaseEstimator):
         if self.config.encode_categorical_as_float:
             self._fit_task_categorical_encoders(X, key_mappings, cutoff_time_column)
             X = self._apply_task_categorical_encoders(X)
+        return X, y
 
-        # 4. Feature Augmentation
-        logger.info("Computing DFS features...")
-        dfs_config = self.config.dfs or DFSConfig()
-        
-        X_dfs = fastdfs.compute_dfs_features(
-            self.rdb_,
-            X,
-            key_mappings=key_mappings,
-            cutoff_time_column=cutoff_time_column,
-            config=dfs_config
-        )
-        logger.debug(f"DFS features: {X_dfs.columns.tolist()}")
-
-        # 5. Preprocessing
+    def _fit_from_dfs(self, X_dfs: pd.DataFrame, y: pd.Series, **kwargs):
+        """Fit the preprocessor and base estimator on DFS features of the training rows."""
         logger.info("Preprocessing augmented features ...")
         self.preprocessor_ = TabularPreprocessor(
             ag_config=self.config.ag_config,
             temporal_diff_config=self.config.temporal_diff,
-            cutoff_time=cutoff_time_column
+            cutoff_time=self.cutoff_time_column_
         )
         X_transformed = self.preprocessor_.fit(X_dfs).transform(X_dfs)
         self.downstream_feature_columns_ = list(X_transformed.columns)
@@ -312,67 +356,28 @@ class RDBLearnEstimator(BaseEstimator):
         self.base_estimator.fit(X_transformed, y, **kwargs)
         return self
 
-    def _transform_for_prediction(self, X: pd.DataFrame, rdb: Optional[RDB]) -> pd.DataFrame:
-        """DFS + preprocessor transform (same as predict path, without calling the base model)."""
+    def _dfs_for_prediction(self, X: pd.DataFrame, rdb: Optional[RDB]) -> pd.DataFrame:
+        """DFS features for prediction rows, against ``rdb`` (augmented with the stored
+        training history) or the fitted ``rdb_`` when ``rdb`` is None."""
         X = X.copy()
         if self.key_mappings_:
             self._ensure_keys_are_strings(X, self.key_mappings_)
 
-        if rdb is None:
-            selected_rdb = self.rdb_
-        else:
-            selected_rdb = self._prepare_rdb(rdb)
+        selected_rdb = None if rdb is None else self._prepare_rdb(rdb)
 
         if self.config.encode_categorical_as_float:
             X = self._apply_task_categorical_encoders(X)
 
         logger.info("Computing DFS features...")
-        dfs_config = self.config.dfs or DFSConfig()
-        X_dfs = fastdfs.compute_dfs_features(
-            selected_rdb,
-            X,
-            key_mappings=self.key_mappings_,
-            cutoff_time_column=self.cutoff_time_column_,
-            config=dfs_config,
-        )
-        logger.info("Preprocessing augmented features ...")
-        return self.preprocessor_.transform(X_dfs)
+        return self._compute_dfs(X, selected_rdb)
 
     def _predict_common(self, X: pd.DataFrame, rdb: Optional[RDB], method: str, **kwargs):
-        # 0. Copy and ensure keys are string
-        X = X.copy()
-        if self.key_mappings_:
-            self._ensure_keys_are_strings(X, self.key_mappings_)
+        return self._predict_from_dfs(self._dfs_for_prediction(X, rdb), method, **kwargs)
 
-        # 2. RDB Selection
-        if rdb is None:
-            selected_rdb = self.rdb_
-        else:
-            # Augment new RDB with stored training history!
-            selected_rdb = self._prepare_rdb(rdb)
-
-        if self.config.encode_categorical_as_float:
-            X = self._apply_task_categorical_encoders(X)
-
-        # 3. Feature Augmentation
-        logger.info("Computing DFS features...")
-        
-        dfs_config = self.config.dfs or DFSConfig()
-        
-        X_dfs = fastdfs.compute_dfs_features(
-            selected_rdb, 
-            X, 
-            key_mappings=self.key_mappings_, 
-            cutoff_time_column=self.cutoff_time_column_, 
-            config=dfs_config
-        )
-
-
-        # 4. Preprocessing
+    def _predict_from_dfs(self, X_dfs: pd.DataFrame, method: str, **kwargs):
         logger.info("Preprocessing augmented features ...")
         X_transformed = self.preprocessor_.transform(X_dfs)
-        
-        # 5. Prediction
+
         logger.info("Making predictions ...")
         predict_func = getattr(self.base_estimator, method)
         
@@ -404,6 +409,26 @@ class RDBLearnEstimator(BaseEstimator):
             return predict_func(X_transformed, **kwargs)
 
 class RDBLearnClassifier(RDBLearnEstimator, ClassifierMixin):
+    def _base_estimator_max_classes(self) -> Optional[int]:
+        """Classes one base-estimator head can take; ``None`` means unlimited.
+
+        Above this, base-10-hierarchical heads are used. Estimators may declare
+        ``rdblearn_max_classes``; TabPFN reports the cap of its checkpoint (10 for
+        v2.5, 160 for v3.5) and TabICL handles any number of classes when
+        ``support_many_classes`` is on. Anything else is assumed to take at most 10.
+        """
+        est = self.base_estimator
+        if hasattr(est, "rdblearn_max_classes"):
+            return est.rdblearn_max_classes
+        if type(est).__module__.startswith("tabicl") and getattr(est, "support_many_classes", False):
+            return None
+        if hasattr(est, "get_inference_config"):
+            try:
+                return int(est.get_inference_config().MAX_NUMBER_OF_CLASSES)
+            except Exception as e:
+                logger.debug(f"Could not read the base estimator's class cap: {e}")
+        return 10
+
     def _fit_model(self, X_transformed: pd.DataFrame, y: pd.Series, **kwargs):
         y_series = y if isinstance(y, pd.Series) else pd.Series(y, name="target")
         le = LabelEncoder()
@@ -418,7 +443,8 @@ class RDBLearnClassifier(RDBLearnEstimator, ClassifierMixin):
         self.base10_decomposer_ = None
         self.digit_estimators_ = None
 
-        if C <= 10:
+        max_classes = self._base_estimator_max_classes()
+        if max_classes is None or C <= max_classes:
             logger.info(f"Fitting base estimator (C={C}, single head) ...")
             self.base_estimator.fit(X_transformed, y_series, **kwargs)
             return self
@@ -474,16 +500,19 @@ class RDBLearnClassifier(RDBLearnEstimator, ClassifierMixin):
         return self._predict_common(X, rdb, method="predict", **kwargs)
 
     def predict_proba(self, X: pd.DataFrame, rdb: Optional[RDB] = None, **kwargs):
+        return self._predict_proba_from_dfs(self._dfs_for_prediction(X, rdb), **kwargs)
+
+    def _predict_proba_from_dfs(self, X_dfs: pd.DataFrame, **kwargs):
         if getattr(self, "base10_hierarchical_", False):
             from sklearn.utils.validation import check_is_fitted
 
             check_is_fitted(
                 self, attributes=["digit_estimators_", "base10_decomposer_"]
             )
-            X_transformed = self._transform_for_prediction(X, rdb)
+            X_transformed = self.preprocessor_.transform(X_dfs)
             logger.info("Making predictions (base-10-hierarchical) ...")
             return self._predict_proba_base10_hierarchical(X_transformed, **kwargs)
-        return self._predict_common(X, rdb, method="predict_proba", **kwargs)
+        return self._predict_from_dfs(X_dfs, method="predict_proba", **kwargs)
 
 class RDBLearnRegressor(RDBLearnEstimator, RegressorMixin):
     def predict(self, X: pd.DataFrame, rdb: Optional[RDB] = None, **kwargs):

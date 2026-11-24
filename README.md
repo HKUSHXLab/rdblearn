@@ -112,6 +112,33 @@ predictions = reg.predict(X=X_test)
 
 See `examples/` for more detailed usage.
 
+### Standard Pipeline
+
+`StandardPipeline` picks the DFS depth (hop) and the foundation model on validation, then refits on train + validation:
+
+1. One DFS at depth `max(hops)` on train and validation, with target augmentation and temporal differences on.
+2. Every (hop, model) pair is scored on validation. A hop-`h` candidate uses exactly the columns a DFS with `max_depth=h` would produce, taken from the single deep DFS.
+3. The best pair is refit on train + validation as a regular `RDBLearnClassifier` / `RDBLearnRegressor` (`pipeline.estimator_`).
+
+```python
+from rdblearn import RDBDataset, StandardPipeline
+
+dataset = RDBDataset.from_relbench("rel-trial", for_task="study-outcome")
+task = dataset.tasks["study-outcome"]
+md = task.metadata
+
+pipeline = StandardPipeline(
+    task_type="classification",
+    hops=(2, 3, 4),
+    models=("tabpfn-v3.5", "tabicl-v2"),
+)
+pipeline.fit(task.train_df, task.val_df, md.target_col, dataset.rdb, md.key_mappings, md.time_col)
+print(pipeline.results_)              # validation score per (hop, model)
+print(pipeline.score(task.test_df))   # test score of the refit model
+```
+
+See `examples/rdblearn_standard_pipeline.py`.
+
 ---
 
 <a id="core-api-reference"></a>
@@ -150,7 +177,16 @@ Scikit-learn compatible estimators for relational learning.
     - `rdb`: Optional RDB context (uses the one from `fit` if not provided).
 - **`predict_proba(X, rdb=None, **kwargs)`**: (Classifier only) Predict class probabilities.
 
-**Multiclass (>10 classes):** For classification tasks with more than 10 training classes, `RDBLearnClassifier` automatically uses **base-10-hierarchical** inference: the label space is decomposed into decimal digit heads (each head has at most 10 classes, compatible with TabPFN), then digit probabilities are fused into a full `(n_samples, C)` matrix. No extra configuration is required. Tasks with **C ≤ 10** use a single model on the original target.
+**Multiclass:** When a task has more classes than the base estimator supports, `RDBLearnClassifier` automatically uses **base-10-hierarchical** inference: the label space is decomposed into decimal digit heads (each head has at most 10 classes), then digit probabilities are fused into a full `(n_samples, C)` matrix. The cap is read from the estimator: TabPFN reports its checkpoint's limit (10 for v2.5, 160 for v3.5), TabICL handles any number of classes, an estimator can declare `rdblearn_max_classes` (`None` for unlimited), and anything else is assumed to take 10.
+
+**DFS sessions:** `fit` opens a fastdfs `DFSSession` on the prepared RDB, so later `predict` / `predict_proba` calls without a new `rdb` reuse its feature plan and DuckDB tables instead of rebuilding them.
+
+### TabPFN and TabICL
+`rdblearn.utils` builds foundation models with RDBLearn's defaults (KV cache on, so `predict` only runs the test rows):
+
+- **`make_tabpfn_classifier(version="v3.5", **overrides)`** / **`make_tabpfn_regressor(...)`**: `version` is one of `TABPFN_VERSIONS` (`"v2"`, `"v2.5"`, `"v2.6"`, `"v3"`, `"v3.5"`, `"v3.5-fast"`). Defaults come from `TABPFN_DEFAULT_CONFIG`.
+- **`make_tabicl_classifier(**overrides)`** / **`make_tabicl_regressor(...)`**: TabICL v2 with `TABICL_DEFAULT_CONFIG`.
+- **`TFM_FACTORIES`**: the model names accepted by `StandardPipeline` (`"tabpfn-v3.5"`, `"tabpfn-v3.5-fast"`, `"tabicl-v2"`).
 
 ### `TaskMetadata`
 Data structure containing task-specific information.

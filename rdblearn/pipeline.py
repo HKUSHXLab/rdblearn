@@ -1,0 +1,236 @@
+"""Standard RDBLearn pipeline.
+
+1. Run DFS once at the deepest hop (``max(hops)``) on train and validation, with
+   target-history augmentation and temporal-difference features on.
+2. Sweep every (hop, foundation model) pair on validation. A hop-``h`` candidate uses
+   exactly the columns a DFS with ``max_depth=h`` would produce, taken from the deep DFS.
+3. Refit the best pair on train + validation as a regular RDBLearn estimator.
+"""
+import copy
+import time
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union
+
+import numpy as np
+import pandas as pd
+from fastdfs import RDB, DFSConfig
+from fastdfs.dfs import dfs_feature_column_name, get_dfs_engine
+from loguru import logger
+from sklearn import metrics as skm
+
+from .config import RDBLearnConfig, TemporalDiffConfig
+from .constants import RDBLEARN_DEFAULT_CONFIG
+from .estimator import RDBLearnClassifier, RDBLearnRegressor
+from .utils import TFM_FACTORIES
+
+# name -> (score function taking (y_true, prediction, classes), greater is better)
+METRICS: Dict[str, Any] = {
+    "roc_auc": (lambda y, p, classes: _roc_auc(y, p, classes), True),
+    "accuracy": (lambda y, p, classes: skm.accuracy_score(y, classes[np.argmax(p, axis=1)]), True),
+    "log_loss": (lambda y, p, classes: skm.log_loss(y, p, labels=classes), False),
+    "mae": (lambda y, p, classes: skm.mean_absolute_error(y, p), False),
+    "rmse": (lambda y, p, classes: float(np.sqrt(skm.mean_squared_error(y, p))), False),
+    "r2": (lambda y, p, classes: skm.r2_score(y, p), True),
+}
+
+
+def _roc_auc(y, proba, classes) -> float:
+    if len(classes) == 2:
+        return skm.roc_auc_score(np.asarray(y) == classes[1], proba[:, 1])
+    return skm.roc_auc_score(y, proba, multi_class="ovr", labels=classes)
+
+
+def planned_dfs_columns(
+    rdb: RDB,
+    X: pd.DataFrame,
+    key_mappings: Dict[str, str],
+    cutoff_time_column: Optional[str],
+    config: DFSConfig,
+) -> List[str]:
+    """Names of the features DFS plans for ``config`` (no feature values are computed).
+
+    fastdfs may still drop planned features while computing, so intersect with the
+    computed columns.
+    """
+    engine = get_dfs_engine(config.engine, config)
+    _, target = engine._prepare_target_for_engine(X, key_mappings, cutoff_time_column)
+    features = engine.prepare_features(
+        rdb.canonicalize_key_types(), target, key_mappings, cutoff_time_column, config
+    )
+    return [dfs_feature_column_name(f) for f in features]
+
+
+class StandardPipeline:
+    """Hop x foundation-model sweep on validation, then refit of the best pair on train + val.
+
+    Args:
+        task_type: ``"classification"`` or ``"regression"``.
+        hops: DFS depths to sweep; DFS itself runs once at ``max(hops)``.
+        models: Names from ``rdblearn.utils.TFM_FACTORIES`` (e.g. ``"tabpfn-v3.5"``,
+            ``"tabicl-v2"``), or a dict of name -> zero-argument estimator factory.
+        metric: Key of :data:`METRICS`; defaults to ``roc_auc`` / ``mae``.
+        config: Base ``RDBLearnConfig``. Target augmentation and temporal differences
+            are switched on and ``dfs.max_depth`` is set by the pipeline.
+        model_params: Keyword overrides passed to every named model factory (e.g. ``device``).
+    """
+
+    def __init__(
+        self,
+        task_type: str,
+        hops: Sequence[int] = (2, 3, 4),
+        models: Union[Sequence[str], Dict[str, Callable[[], Any]]] = ("tabpfn-v3.5", "tabicl-v2"),
+        metric: Optional[str] = None,
+        config: Optional[RDBLearnConfig] = None,
+        model_params: Optional[Dict[str, Any]] = None,
+    ):
+        if task_type not in ("classification", "regression"):
+            raise ValueError(f"task_type must be 'classification' or 'regression', got {task_type!r}")
+        self.task_type = task_type
+        self.hops = sorted(set(int(h) for h in hops))
+        self.models = models
+        self.metric = metric or ("roc_auc" if task_type == "classification" else "mae")
+        if self.metric not in METRICS:
+            raise ValueError(f"Unknown metric {self.metric!r}; expected one of {sorted(METRICS)}")
+        self.config = config
+        self.model_params = model_params or {}
+
+    # ------------------------------------------------------------------ helpers
+
+    def _estimator_cls(self):
+        return RDBLearnClassifier if self.task_type == "classification" else RDBLearnRegressor
+
+    def _model_factories(self) -> Dict[str, Callable[[], Any]]:
+        if isinstance(self.models, dict):
+            return dict(self.models)
+        factories = {}
+        for name in self.models:
+            if name not in TFM_FACTORIES:
+                raise ValueError(f"Unknown model {name!r}; expected one of {sorted(TFM_FACTORIES)}")
+            make = TFM_FACTORIES[name][0 if self.task_type == "classification" else 1]
+            factories[name] = lambda make=make: make(**self.model_params)
+        return factories
+
+    def _config_for_depth(self, depth: int) -> RDBLearnConfig:
+        base = self.config or RDBLearnConfig(**RDBLEARN_DEFAULT_CONFIG)
+        dfs = (base.dfs or DFSConfig()).model_copy(update={"max_depth": depth})
+        temporal = (base.temporal_diff or TemporalDiffConfig()).model_copy(update={"enabled": True})
+        return base.model_copy(
+            update={"dfs": dfs, "enable_target_augmentation": True, "temporal_diff": temporal}
+        )
+
+    def _predictions(self, est, X_dfs: Optional[pd.DataFrame] = None, X: Optional[pd.DataFrame] = None):
+        if self.task_type == "classification":
+            if X_dfs is not None:
+                return np.asarray(est._predict_proba_from_dfs(X_dfs))
+            return np.asarray(est.predict_proba(X))
+        if X_dfs is not None:
+            return np.asarray(est._predict_from_dfs(X_dfs, "predict"))
+        return np.asarray(est.predict(X))
+
+    def _score(self, est, y, predictions) -> float:
+        fn, _ = METRICS[self.metric]
+        classes = getattr(est, "classes_", None)
+        return float(fn(np.asarray(y), predictions, classes))
+
+    @staticmethod
+    def _free_gpu_memory():
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:  # pragma: no cover
+            pass
+
+    # ------------------------------------------------------------------ API
+
+    def fit(
+        self,
+        train_df: pd.DataFrame,
+        val_df: pd.DataFrame,
+        target_col: str,
+        rdb: RDB,
+        key_mappings: Dict[str, str],
+        cutoff_time_column: Optional[str] = None,
+    ):
+        factories = self._model_factories()
+        est_cls = self._estimator_cls()
+        max_hop = max(self.hops)
+        self.target_col_ = target_col
+
+        # 1. One DFS at the deepest hop, shared by every candidate.
+        t0 = time.perf_counter()
+        featurizer = est_cls(base_estimator=None, config=self._config_for_depth(max_hop))
+        X_train, y_train = featurizer._fit_rdb(
+            train_df.drop(columns=[target_col]), train_df[target_col],
+            rdb, key_mappings, cutoff_time_column,
+        )
+        D_train = featurizer._compute_dfs(X_train)
+        D_val = featurizer._dfs_for_prediction(val_df.drop(columns=[target_col]), None)
+        y_val = val_df[target_col]
+        featurizer._close_dfs_session()
+        self.dfs_seconds_ = time.perf_counter() - t0
+
+        base_columns = [c for c in D_train.columns if c in X_train.columns]
+        computed = set(D_train.columns) - set(base_columns)
+        self.hop_columns_ = {}
+        for hop in self.hops:
+            planned = set(planned_dfs_columns(
+                featurizer.rdb_, X_train, key_mappings, cutoff_time_column,
+                self._config_for_depth(hop).dfs,
+            ))
+            self.hop_columns_[hop] = base_columns + [c for c in D_train.columns if c in planned & computed]
+        logger.info(
+            f"DFS depth {max_hop}: {len(computed)} features in {self.dfs_seconds_:.1f}s; "
+            + ", ".join(f"hop {h}: {len(c) - len(base_columns)}" for h, c in self.hop_columns_.items())
+        )
+
+        # 2. Sweep (hop x model) on validation.
+        rows = []
+        for hop in self.hops:
+            cols = self.hop_columns_[hop]
+            for name, make in factories.items():
+                t0 = time.perf_counter()
+                cand = copy.copy(featurizer)
+                cand.base_estimator = make()
+                cand._fit_from_dfs(D_train[cols], y_train)
+                predictions = self._predictions(cand, X_dfs=D_val[cols])
+                score = self._score(cand, y_val, predictions)
+                rows.append({
+                    "hop": hop, "model": name, "n_features": len(cols) - len(base_columns),
+                    f"val_{self.metric}": score, "seconds": time.perf_counter() - t0,
+                })
+                logger.info(f"hop={hop} model={name}: val {self.metric}={score:.4f}")
+                del cand
+                self._free_gpu_memory()
+        self.results_ = pd.DataFrame(rows)
+
+        # 3. Refit the best (hop, model) on train + validation.
+        _, greater_is_better = METRICS[self.metric]
+        scores = self.results_[f"val_{self.metric}"]
+        best = self.results_.loc[scores.idxmax() if greater_is_better else scores.idxmin()]
+        self.best_ = {"hop": int(best["hop"]), "model": best["model"], f"val_{self.metric}": float(best[f"val_{self.metric}"])}
+        logger.info(f"Best: {self.best_}; refitting on train + validation.")
+
+        t0 = time.perf_counter()
+        train_val = pd.concat([train_df, val_df], ignore_index=True)
+        self.estimator_ = est_cls(
+            base_estimator=factories[self.best_["model"]](),
+            config=self._config_for_depth(self.best_["hop"]),
+        )
+        self.estimator_.fit(
+            train_val.drop(columns=[target_col]), train_val[target_col],
+            rdb=rdb, key_mappings=key_mappings, cutoff_time_column=cutoff_time_column,
+        )
+        self.refit_seconds_ = time.perf_counter() - t0
+        return self
+
+    def predict(self, X: pd.DataFrame):
+        return self.estimator_.predict(X)
+
+    def predict_proba(self, X: pd.DataFrame):
+        return self.estimator_.predict_proba(X)
+
+    def score(self, df: pd.DataFrame) -> float:
+        """``metric`` of the refitted model on ``df`` (which must contain the target column)."""
+        X = df.drop(columns=[self.target_col_])
+        return self._score(self.estimator_, df[self.target_col_], self._predictions(self.estimator_, X=X))

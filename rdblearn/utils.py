@@ -1,4 +1,4 @@
-from typing import Optional, Union, Tuple
+from typing import Any, Dict, Optional, Union, Tuple
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
@@ -312,3 +312,72 @@ class TabFMWrapperRegressor(_TabFMWrapperBase, RegressorMixin):
     """
 
     _task_type = "regression"
+
+
+# ---------------------------------------------------------------------------
+# TabPFN (tabpfn>=9.0.0) and TabICL (tabicl>=2.0.0) model selection
+# ---------------------------------------------------------------------------
+
+TABPFN_VERSIONS = ("v2", "v2.5", "v2.6", "v3", "v3.5", "v3.5-fast")
+
+
+def _make_tabpfn(task: str, version: str, overrides: Dict[str, Any]):
+    from tabpfn import TabPFNClassifier, TabPFNRegressor
+    from tabpfn.constants import ModelVersion
+
+    from .constants import TABPFN_DEFAULT_CONFIG
+
+    if version not in TABPFN_VERSIONS:
+        raise ValueError(f"Unknown TabPFN version {version!r}; expected one of {TABPFN_VERSIONS}")
+    est_cls = TabPFNClassifier if task == "classification" else TabPFNRegressor
+    return est_cls.create_default_for_version(
+        ModelVersion(version), **{**TABPFN_DEFAULT_CONFIG, **overrides}
+    )
+
+
+def make_tabpfn_classifier(version: str = "v3.5", **overrides):
+    """Build a ``TabPFNClassifier`` for ``version`` with RDBLearn's defaults.
+
+    ``version`` is one of :data:`TABPFN_VERSIONS`: ``"v3.5"`` is TabPFN-3.5 and
+    ``"v3.5-fast"`` the smaller TabPFN-3.5-Fast. Defaults come from
+    ``TABPFN_DEFAULT_CONFIG`` (including ``fit_mode="fit_with_cache"``);
+    ``overrides`` take precedence.
+    """
+    return _make_tabpfn("classification", version, overrides)
+
+
+def make_tabpfn_regressor(version: str = "v3.5", **overrides):
+    """Build a ``TabPFNRegressor``; see :func:`make_tabpfn_classifier`."""
+    return _make_tabpfn("regression", version, overrides)
+
+
+def make_tabicl_classifier(**overrides):
+    """Build a TabICL v2 ``TabICLClassifier`` with ``TABICL_DEFAULT_CONFIG`` (KV cache on)."""
+    from tabicl import TabICLClassifier
+
+    from .constants import TABICL_DEFAULT_CONFIG
+
+    return TabICLClassifier(**{**TABICL_DEFAULT_CONFIG, **overrides})
+
+
+def make_tabicl_regressor(**overrides):
+    """Build a TabICL v2 ``TabICLRegressor``; see :func:`make_tabicl_classifier`."""
+    from tabicl import TabICLRegressor
+
+    from .constants import TABICL_DEFAULT_CONFIG
+
+    return TabICLRegressor(**{**TABICL_DEFAULT_CONFIG, **overrides})
+
+
+# Named foundation models for ``StandardPipeline``: name -> (classifier factory, regressor factory).
+TFM_FACTORIES = {
+    "tabpfn-v3.5": (
+        lambda **kw: make_tabpfn_classifier("v3.5", **kw),
+        lambda **kw: make_tabpfn_regressor("v3.5", **kw),
+    ),
+    "tabpfn-v3.5-fast": (
+        lambda **kw: make_tabpfn_classifier("v3.5-fast", **kw),
+        lambda **kw: make_tabpfn_regressor("v3.5-fast", **kw),
+    ),
+    "tabicl-v2": (make_tabicl_classifier, make_tabicl_regressor),
+}
