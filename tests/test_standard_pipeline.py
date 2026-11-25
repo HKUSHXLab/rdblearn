@@ -106,6 +106,24 @@ class TestDFSSessionReuse(unittest.TestCase):
         )
         pd.testing.assert_frame_equal(via_session, one_shot[via_session.columns], check_dtype=False)
 
+    def test_session_and_one_shot_predictions_match(self):
+        class OneShotDFSClassifier(RDBLearnClassifier):
+            def _compute_dfs(self, X, rdb=None):
+                return fastdfs.compute_dfs_features(
+                    rdb if rdb is not None else self.rdb_, X, key_mappings=self.key_mappings_,
+                    cutoff_time_column=self.cutoff_time_column_, config=self._dfs_config(),
+                )
+
+        predictions = []
+        for cls in (RDBLearnClassifier, OneShotDFSClassifier):
+            clf = cls(base_estimator=FirstFeatureClassifier())
+            clf.fit(self.train.drop(columns=["label"]), self.train["label"], **self.kw)
+            predictions.append([
+                clf.predict_proba(split.drop(columns=["label"])) for split in (self.val, self.test)
+            ])
+        for session_proba, one_shot_proba in zip(*predictions):
+            np.testing.assert_allclose(session_proba, one_shot_proba)
+
     def test_pickled_estimator_reopens_session(self):
         clf = RDBLearnClassifier(base_estimator=FirstFeatureClassifier())
         clf.fit(self.train.drop(columns=["label"]), self.train["label"], **self.kw)
