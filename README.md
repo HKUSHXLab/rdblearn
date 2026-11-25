@@ -166,6 +166,7 @@ Scikit-learn compatible estimators for relational learning.
         - `enable_target_augmentation` (bool, default True): Augment the RDB with the full training target history table, enabling DFS to derive entity-level target aggregate features (e.g., entity mean). Requires `cutoff_time_column` to be set during `fit`.
         - `temporal_diff` (dict or TemporalDiffConfig, default `{"enabled": True}`): Convert DFS-generated epoch-time columns into temporal difference features relative to the cutoff time. Supports `enabled` (bool) and `exclude_columns` (list of column names to skip).
         - `predict_batch_size` (int, default 5000): Batch size for prediction.
+        - `regression_output_type` (str or None, default `"median"`): Point prediction requested from regressors that predict a distribution (TabPFN, TabICL, Kumo-Tabular), passed as `output_type` to any base estimator whose `predict` takes it. `None` keeps the estimator's own default (the mean for TabPFN and TabICL). LimiX and TabFM predict a single value per row, so this does not apply to them.
 - **`fit(X, y, rdb, key_mappings, cutoff_time_column=None, **kwargs)`**:
     - `X`: Training features (DataFrame).
     - `y`: Training labels (Series).

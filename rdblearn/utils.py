@@ -65,6 +65,9 @@ class LimiXWrapperClassifier(BaseEstimator, ClassifierMixin):
 class LimiXWrapperRegressor(BaseEstimator, RegressorMixin):
     """
     A scikit-learn compatible wrapper for the LimiX regressor.
+
+    LimiX's regression head predicts one value per row (averaged over its ensemble),
+    so unlike TabPFN, TabICL and Kumo-Tabular there is no median to choose.
     """
     
     def __init__(self, predictor):
@@ -519,9 +522,13 @@ class KumoTabularWrapperRegressor(_KumoTabularWrapperBase, RegressorMixin):
         """All 999 predicted quantiles, shape (n_samples, 999), levels 0.001 .. 0.999."""
         return self._predict_table(X).numerical.double().cpu().numpy()
 
-    def predict(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
+    def predict(self, X: Union[pd.DataFrame, np.ndarray], output_type: Optional[str] = None) -> np.ndarray:
+        """Point prediction: ``output_type`` (default ``self.output_type``) is ``"median"`` or ``"mean"``."""
+        output_type = output_type or self.output_type
+        if output_type not in ("median", "mean"):
+            raise ValueError(f"output_type must be 'median' or 'mean', got {output_type!r}")
         quantiles = self.predict_quantiles(X)
-        if self.output_type == "median":
+        if output_type == "median":
             return quantiles[:, 499]
         return quantiles.mean(axis=1)
 

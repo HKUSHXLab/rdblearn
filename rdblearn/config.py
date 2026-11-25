@@ -33,6 +33,11 @@ class RDBLearnConfig(BaseModel):
     # Prediction Configuration
     predict_batch_size: int = 5000
 
+    # Point prediction requested from regressors that predict a distribution (TabPFN,
+    # TabICL, Kumo-Tabular): passed as `output_type` to base estimators whose `predict`
+    # takes that argument. None keeps each estimator's own default.
+    regression_output_type: Optional[str] = "median"
+
     # Temporal Difference Configuration (post-DFS transformation)
     temporal_diff: Optional[TemporalDiffConfig] = TemporalDiffConfig()
 

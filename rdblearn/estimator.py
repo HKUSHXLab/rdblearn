@@ -1,3 +1,4 @@
+import inspect
 from typing import Optional, Dict, Union, List, Any
 import pandas as pd
 import numpy as np
@@ -517,3 +518,14 @@ class RDBLearnClassifier(RDBLearnEstimator, ClassifierMixin):
 class RDBLearnRegressor(RDBLearnEstimator, RegressorMixin):
     def predict(self, X: pd.DataFrame, rdb: Optional[RDB] = None, **kwargs):
         return self._predict_common(X, rdb, method="predict", **kwargs)
+
+    def _predict_from_dfs(self, X_dfs: pd.DataFrame, method: str, **kwargs):
+        output_type = self.config.regression_output_type
+        if (
+            method == "predict"
+            and output_type is not None
+            and "output_type" not in kwargs
+            and "output_type" in inspect.signature(self.base_estimator.predict).parameters
+        ):
+            kwargs["output_type"] = output_type
+        return super()._predict_from_dfs(X_dfs, method, **kwargs)
