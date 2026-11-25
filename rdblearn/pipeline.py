@@ -23,6 +23,10 @@ from .estimator import RDBLearnClassifier, RDBLearnRegressor
 from .utils import TFM_FACTORIES
 
 # name -> (score function taking (y_true, prediction, classes), greater is better)
+# Regression metrics score the point prediction chosen by ``regression_output_type``
+# (median by default). The median minimises absolute error (``mae``); the mean minimises
+# squared error, so prefer ``regression_output_type="mean"`` when selecting on ``rmse``
+# or ``r2``.
 METRICS: Dict[str, Any] = {
     "roc_auc": (lambda y, p, classes: _roc_auc(y, p, classes), True),
     "accuracy": (lambda y, p, classes: skm.accuracy_score(y, classes[np.argmax(p, axis=1)]), True),
@@ -72,6 +76,12 @@ class StandardPipeline:
         config: Base ``RDBLearnConfig``. Target augmentation and temporal differences
             are switched on and ``dfs.max_depth`` is set by the pipeline.
         model_params: Keyword overrides passed to every named model factory (e.g. ``device``).
+        regression_output_type: Point prediction of regressors, ``"median"`` or ``"mean"``.
+            ``None`` keeps ``config.regression_output_type`` (``"median"`` by default).
+
+    A candidate that runs out of memory is recorded with a NaN score and an ``error``
+    in ``results_``; if the best candidate runs out of memory during the refit, the
+    next best is refit instead.
     """
 
     def __init__(
@@ -82,9 +92,15 @@ class StandardPipeline:
         metric: Optional[str] = None,
         config: Optional[RDBLearnConfig] = None,
         model_params: Optional[Dict[str, Any]] = None,
+        regression_output_type: Optional[str] = None,
     ):
         if task_type not in ("classification", "regression"):
             raise ValueError(f"task_type must be 'classification' or 'regression', got {task_type!r}")
+        if regression_output_type not in (None, "median", "mean"):
+            raise ValueError(
+                f"regression_output_type must be 'median', 'mean' or None, got {regression_output_type!r}"
+            )
+        self.regression_output_type = regression_output_type
         self.task_type = task_type
         self.hops = sorted(set(int(h) for h in hops))
         self.models = models
@@ -114,9 +130,10 @@ class StandardPipeline:
         base = self.config or RDBLearnConfig(**RDBLEARN_DEFAULT_CONFIG)
         dfs = (base.dfs or DFSConfig()).model_copy(update={"max_depth": depth})
         temporal = (base.temporal_diff or TemporalDiffConfig()).model_copy(update={"enabled": True})
-        return base.model_copy(
-            update={"dfs": dfs, "enable_target_augmentation": True, "temporal_diff": temporal}
-        )
+        update = {"dfs": dfs, "enable_target_augmentation": True, "temporal_diff": temporal}
+        if self.regression_output_type is not None:
+            update["regression_output_type"] = self.regression_output_type
+        return base.model_copy(update=update)
 
     def _predictions(self, est, X_dfs: Optional[pd.DataFrame] = None, X: Optional[pd.DataFrame] = None):
         if self.task_type == "classification":
@@ -141,6 +158,19 @@ class StandardPipeline:
                 torch.cuda.empty_cache()
         except ImportError:  # pragma: no cover
             pass
+
+    @staticmethod
+    def _is_out_of_memory(error: BaseException) -> bool:
+        if isinstance(error, MemoryError):
+            return True
+        try:
+            import torch
+
+            if isinstance(error, torch.cuda.OutOfMemoryError):
+                return True
+        except ImportError:  # pragma: no cover
+            pass
+        return isinstance(error, RuntimeError) and "out of memory" in str(error).lower()
 
     # ------------------------------------------------------------------ API
 
@@ -191,38 +221,66 @@ class StandardPipeline:
             cols = self.hop_columns_[hop]
             for name, make in factories.items():
                 t0 = time.perf_counter()
+                score, error = float("nan"), None
                 cand = copy.copy(featurizer)
-                cand.base_estimator = make()
-                cand._fit_from_dfs(D_train[cols], y_train)
-                predictions = self._predictions(cand, X_dfs=D_val[cols])
-                score = self._score(cand, y_val, predictions)
+                try:
+                    cand.base_estimator = make()
+                    cand._fit_from_dfs(D_train[cols], y_train)
+                    predictions = self._predictions(cand, X_dfs=D_val[cols])
+                    score = self._score(cand, y_val, predictions)
+                    logger.info(f"hop={hop} model={name}: val {self.metric}={score:.4f}")
+                except Exception as e:
+                    if not self._is_out_of_memory(e):
+                        raise
+                    error = f"{type(e).__name__}: {e}"
+                    logger.warning(f"hop={hop} model={name}: out of memory, skipped ({error})")
+                finally:
+                    del cand
+                    self._free_gpu_memory()
                 rows.append({
                     "hop": hop, "model": name, "n_features": len(cols) - len(base_columns),
-                    f"val_{self.metric}": score, "seconds": time.perf_counter() - t0,
+                    f"val_{self.metric}": score, "seconds": time.perf_counter() - t0, "error": error,
                 })
-                logger.info(f"hop={hop} model={name}: val {self.metric}={score:.4f}")
-                del cand
-                self._free_gpu_memory()
         self.results_ = pd.DataFrame(rows)
 
-        # 3. Refit the best (hop, model) on train + validation.
+        # 3. Refit the best (hop, model) on train + validation, falling back to the next
+        #    best candidate if the refit runs out of memory.
         _, greater_is_better = METRICS[self.metric]
-        scores = self.results_[f"val_{self.metric}"]
-        best = self.results_.loc[scores.idxmax() if greater_is_better else scores.idxmin()]
-        self.best_ = {"hop": int(best["hop"]), "model": best["model"], f"val_{self.metric}": float(best[f"val_{self.metric}"])}
-        logger.info(f"Best: {self.best_}; refitting on train + validation.")
+        score_col = f"val_{self.metric}"
+        ranked = self.results_.dropna(subset=[score_col]).sort_values(
+            score_col, ascending=not greater_is_better, kind="stable"
+        )
+        if ranked.empty:
+            raise RuntimeError(f"Every candidate ran out of memory:\n{self.results_}")
 
-        t0 = time.perf_counter()
         train_val = pd.concat([train_df, val_df], ignore_index=True)
-        self.estimator_ = est_cls(
-            base_estimator=factories[self.best_["model"]](),
-            config=self._config_for_depth(self.best_["hop"]),
-        )
-        self.estimator_.fit(
-            train_val.drop(columns=[target_col]), train_val[target_col],
-            rdb=rdb, key_mappings=key_mappings, cutoff_time_column=cutoff_time_column,
-        )
-        self.refit_seconds_ = time.perf_counter() - t0
+        self.estimator_ = None
+        for _, row in ranked.iterrows():
+            best = {"hop": int(row["hop"]), "model": row["model"], score_col: float(row[score_col])}
+            logger.info(f"Best: {best}; refitting on train + validation.")
+            t0 = time.perf_counter()
+            estimator = est_cls(
+                base_estimator=factories[best["model"]](),
+                config=self._config_for_depth(best["hop"]),
+            )
+            try:
+                estimator.fit(
+                    train_val.drop(columns=[target_col]), train_val[target_col],
+                    rdb=rdb, key_mappings=key_mappings, cutoff_time_column=cutoff_time_column,
+                )
+            except Exception as e:
+                if not self._is_out_of_memory(e):
+                    raise
+                logger.warning(f"Refit of {best} ran out of memory ({type(e).__name__}: {e}); trying the next best.")
+                estimator._close_dfs_session()
+                del estimator
+                self._free_gpu_memory()
+                continue
+            self.best_, self.estimator_ = best, estimator
+            self.refit_seconds_ = time.perf_counter() - t0
+            break
+        if self.estimator_ is None:
+            raise RuntimeError("Every candidate ran out of memory during the refit on train + validation.")
         return self
 
     def predict(self, X: pd.DataFrame):

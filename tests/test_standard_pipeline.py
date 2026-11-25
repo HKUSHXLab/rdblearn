@@ -40,6 +40,41 @@ class FirstFeatureClassifier(BaseEstimator, ClassifierMixin):
         return self.classes_[np.argmax(self.predict_proba(X), axis=1)]
 
 
+class ReversedFeatureClassifier(FirstFeatureClassifier):
+    def predict_proba(self, X):
+        return super().predict_proba(X)[:, ::-1]
+
+
+class ConstantClassifier(FirstFeatureClassifier):
+    """Validation ROC AUC of exactly 0.5."""
+
+    def predict_proba(self, X):
+        return np.full((len(X), 2), 0.5)
+
+
+class OutOfMemoryClassifier(FirstFeatureClassifier):
+    """Raises CUDA out-of-memory when fit on more than ``max_rows`` rows."""
+
+    def __init__(self, column_index=0, max_rows=0, reverse=False):
+        super().__init__(column_index)
+        self.max_rows = max_rows
+        self.reverse = reverse
+
+    def fit(self, X, y):
+        if len(X) > self.max_rows:
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 80.00 GiB")
+        return super().fit(X, y)
+
+    def predict_proba(self, X):
+        proba = super().predict_proba(X)
+        return proba[:, ::-1] if self.reverse else proba
+
+
+class BrokenClassifier(FirstFeatureClassifier):
+    def fit(self, X, y):
+        raise ValueError("not an out-of-memory error")
+
+
 def make_relational_data(n_users=60, seed=0):
     """users <- orders -> products <- reviews: deep enough for depth-3 and depth-4 features."""
     rng = np.random.default_rng(seed)
@@ -185,6 +220,64 @@ class TestStandardPipeline(unittest.TestCase):
             StandardPipeline("classification", metric="f2")
         with self.assertRaises(ValueError):
             StandardPipeline("classification", models=("tabpfn-v9",))._model_factories()
+        with self.assertRaises(ValueError):
+            StandardPipeline("regression", regression_output_type="mode")
+
+    def test_regression_output_type(self):
+        self.assertEqual(StandardPipeline("regression")._config_for_depth(2).regression_output_type, "median")
+        pipe = StandardPipeline("regression", metric="rmse", regression_output_type="mean")
+        self.assertEqual(pipe._config_for_depth(2).regression_output_type, "mean")
+        config = RDBLearnConfig(**{**RDBLEARN_DEFAULT_CONFIG, "regression_output_type": "mean"})
+        self.assertEqual(StandardPipeline("regression", config=config)._config_for_depth(2).regression_output_type, "mean")
+
+    def test_out_of_memory_candidates_are_skipped(self):
+        rdb, train, val, test = make_relational_data()
+        pipe = StandardPipeline(
+            task_type="classification",
+            hops=(2, 3),
+            models={"oom": lambda: OutOfMemoryClassifier(), "col0": lambda: FirstFeatureClassifier(0)},
+        )
+        pipe.fit(train, val, "label", rdb, {"user_id": "users.user_id"}, "cutoff")
+
+        oom = pipe.results_[pipe.results_["model"] == "oom"]
+        self.assertEqual(len(oom), 2)
+        self.assertTrue(oom["val_roc_auc"].isna().all())
+        self.assertTrue(oom["error"].str.contains("OutOfMemoryError").all())
+        self.assertEqual(pipe.best_["model"], "col0")
+        self.assertTrue(0.0 <= pipe.score(test) <= 1.0)
+
+    def test_refit_out_of_memory_falls_back_to_next_best(self):
+        rdb, train, val, test = make_relational_data()
+        n_train = len(train)
+        # "a" and "b" score 1 - each other's ROC AUC, so one of them ranks at or above the
+        # constant model's 0.5; both fit on train but run out of memory on train + val.
+        pipe = StandardPipeline(
+            task_type="classification",
+            hops=(2,),
+            models={
+                "a": lambda: OutOfMemoryClassifier(0, max_rows=n_train),
+                "b": lambda: OutOfMemoryClassifier(0, max_rows=n_train, reverse=True),
+                "constant": lambda: ConstantClassifier(),
+            },
+        )
+        pipe.fit(train, val, "label", rdb, {"user_id": "users.user_id"}, "cutoff")
+
+        self.assertFalse(pipe.results_["val_roc_auc"].isna().any())
+        self.assertNotEqual(pipe.results_["val_roc_auc"].idxmax(), 2)
+        self.assertEqual(pipe.best_["model"], "constant")
+        self.assertEqual(len(pipe.estimator_.history_df_), len(train) + len(val))
+
+    def test_every_candidate_out_of_memory_raises(self):
+        rdb, train, val, _ = make_relational_data()
+        pipe = StandardPipeline("classification", hops=(2,), models={"oom": lambda: OutOfMemoryClassifier()})
+        with self.assertRaisesRegex(RuntimeError, "Every candidate ran out of memory"):
+            pipe.fit(train, val, "label", rdb, {"user_id": "users.user_id"}, "cutoff")
+
+    def test_other_errors_are_not_swallowed(self):
+        rdb, train, val, _ = make_relational_data()
+        pipe = StandardPipeline("classification", hops=(2,), models={"bad": lambda: BrokenClassifier()})
+        with self.assertRaises(ValueError):
+            pipe.fit(train, val, "label", rdb, {"user_id": "users.user_id"}, "cutoff")
 
 
 @unittest.skipUnless(HAS_CUDA, "needs a GPU and foundation-model weights")
