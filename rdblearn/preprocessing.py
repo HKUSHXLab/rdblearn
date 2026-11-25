@@ -157,6 +157,11 @@ class AutoGluonTransformer(BaseEstimator, TransformerMixin):
             "enable_raw_text_features": False,
             "enable_text_special_features": False,
             "enable_text_ngram_features": False,
+            # Keep every DFS column: AutoGluon's defaults drop constant / all-NaN columns,
+            # duplicate columns and near-unique categorical columns.
+            "pre_drop_useless": False,
+            "post_drop_duplicates": False,
+            "post_generators": [],
         }
         if self.ag_config:
             self._default_ag_config.update(self.ag_config)

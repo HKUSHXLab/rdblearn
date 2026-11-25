@@ -19,7 +19,7 @@ TABICL_DEFAULT_CONFIG = {
 RDBLEARN_DEFAULT_CONFIG = {
     "dfs": {
         "max_depth": 2,
-        "agg_primitives": ["max", "min", "mean", "count", "mode", "std"],
+        "agg_primitives": ["max", "min", "mean", "count", "mode", "std", "num_unique"],
         "engine": "dfs2sql"
     },
     "max_train_samples": 10000,

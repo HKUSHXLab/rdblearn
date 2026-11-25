@@ -50,6 +50,7 @@ def make_relational_data(n_users=60, seed=0):
         "user_id": [str(i) for i in rng.integers(0, n_users, 600)],
         "product_id": [str(i) for i in rng.integers(0, 20, 600)],
         "amount": rng.random(600) * 100,
+        "channel": rng.choice(["web", "app", "store"], 600),
         "ts": pd.Timestamp("2023-01-01") + pd.to_timedelta(rng.integers(0, 300, 600), unit="D"),
     })
     reviews = pd.DataFrame({
@@ -144,6 +145,7 @@ class TestHopSelection(unittest.TestCase):
 
         deep = fastdfs.compute_dfs_features(rdb, X, key_mappings=km, cutoff_time_column="cutoff", config=cfg(4))
         n_deep = len(deep.columns) - len(X.columns)
+        self.assertTrue(any("NUM_UNIQUE(" in c for c in deep.columns))
         for depth in (2, 3):
             direct = fastdfs.compute_dfs_features(rdb, X, key_mappings=km, cutoff_time_column="cutoff", config=cfg(depth))
             planned = set(planned_dfs_columns(rdb, X, km, "cutoff", cfg(depth)))

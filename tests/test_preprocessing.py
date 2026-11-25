@@ -222,5 +222,23 @@ class TestTabularPreprocessor(unittest.TestCase):
         mock_ag_instance.fit.assert_called_once()
         mock_ag_instance.transform.assert_called_once()
 
+
+class TestAutoGluonKeepsAllColumns(unittest.TestCase):
+    def test_constant_missing_and_duplicate_columns_are_kept(self):
+        if isinstance(sys.modules.get("autogluon.features.generators"), MagicMock):
+            self.skipTest("autogluon is not installed")
+        rng = np.random.default_rng(0)
+        x = rng.random(50)
+        df = pd.DataFrame({
+            "x": x,
+            "x_copy": x,
+            "constant": 1.0,
+            "all_missing": np.nan,
+            "id_like": [f"id{i}" for i in range(50)],
+        })
+        pp = TabularPreprocessor(temporal_diff_config=TemporalDiffConfig(enabled=False))
+        out = pp.fit(df).transform(df)
+        self.assertEqual(sorted(out.columns), sorted(df.columns))
+
 if __name__ == '__main__':
     unittest.main()
