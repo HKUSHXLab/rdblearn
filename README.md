@@ -27,7 +27,8 @@
 
 * 🔧 **FastDFS** - Efficient Deep Feature Synthesis for automated multi-table flattening.
 * 🤖 **RDBLearn Estimators** - Scikit-learn compatible `RDBLearnClassifier` and `RDBLearnRegressor` that integrate DFS and single-table models.
-* ⚡ **Foundation Models** - Seamless integration with TabPFN and other foundation models for single table prediction tasks.
+* ⚡ **Foundation Models** - Seamless integration with TabPFN and other foundation models for single table prediction tasks (see [Supported TFMs](#supported-tfms)).
+* 🏁 **Standard Pipeline** - `StandardPipeline` runs one DFS, selects the DFS depth and foundation model on validation, refits on train + validation and reports test performance.
 
 ---
 
@@ -182,13 +183,33 @@ Scikit-learn compatible estimators for relational learning.
 
 **DFS sessions:** `fit` opens a fastdfs `DFSSession` on the prepared RDB, so later `predict` / `predict_proba` calls without a new `rdb` reuse its feature plan and DuckDB tables instead of rebuilding them.
 
-### TabPFN, Kumo-Tabular and TabICL
-`rdblearn.utils` builds foundation models with RDBLearn's defaults (KV cache on, so `predict` only runs the test rows):
+### `StandardPipeline`
+DFS-depth × foundation-model selection on validation, then refit on train + validation.
 
-- **`make_tabpfn_classifier(version="v3.5", **overrides)`** / **`make_tabpfn_regressor(...)`**: `version` is one of `TABPFN_VERSIONS` (`"v2"`, `"v2.5"`, `"v2.6"`, `"v3"`, `"v3.5"`, `"v3.5-fast"`). Defaults come from `TABPFN_DEFAULT_CONFIG`.
-- **`KumoTabularWrapperClassifier(size="medium", device="cuda", n_estimators=8, estimator_batch_size=1, random_state=0)`** / **`KumoTabularWrapperRegressor(..., output_type="median")`**: NVIDIA [Kumo-Tabular](https://huggingface.co/nvidia/Kumo-Tabular) via `structured-data-models`. `size` is `"small"` (~28M parameters), `"medium"` (~62M) or `"large"` (~215M). `fit` caches the encoded training context. The classifier handles any number of classes natively. The regressor predicts 999 quantiles (`predict_quantiles`) and returns the median (or the mean with `output_type="mean"`).
-- **`make_tabicl_classifier(**overrides)`** / **`make_tabicl_regressor(...)`**: TabICL v2 with `TABICL_DEFAULT_CONFIG`.
-- **`TFM_FACTORIES`**: the model names accepted by `StandardPipeline`: `"tabpfn-v3.5"`, `"tabpfn-v3.5-fast"`, `"kumo-tabular-small"`, `"kumo-tabular-medium"`, `"kumo-tabular-large"`, `"tabicl-v2"`.
+- **`__init__(task_type, hops=(2, 3, 4), models=("tabpfn-v3.5", "kumo-tabular-medium"), metric=None, config=None, model_params=None)`**:
+    - `task_type`: `"classification"` or `"regression"`.
+    - `hops`: DFS depths to sweep. DFS runs once at `max(hops)`.
+    - `models`: names from the `StandardPipeline` column of [Supported TFMs](#supported-tfms), or a dict of name → zero-argument estimator factory.
+    - `metric`: one of `roc_auc`, `accuracy`, `log_loss` (classification) or `mae`, `rmse`, `r2` (regression). Defaults to `roc_auc` / `mae`.
+    - `config`: base `RDBLearnConfig`. Target augmentation and temporal differences are always on, and `dfs.max_depth` is set by the pipeline.
+    - `model_params`: keyword overrides passed to every named model factory (e.g. `{"device": "cuda"}`).
+- **`fit(train_df, val_df, target_col, rdb, key_mappings, cutoff_time_column=None)`**: runs the sweep and the refit. Sets `results_` (validation score per hop and model), `best_` (the selected pair) and `estimator_` (the refit `RDBLearnClassifier` / `RDBLearnRegressor`).
+- **`predict(df)`**, **`predict_proba(df)`**, **`score(df)`**: use the refit estimator; `score` returns the pipeline metric on `df`.
+
+<a id="supported-tfms"></a>
+
+### Supported TFMs
+Tabular foundation models with ready-made constructors in `rdblearn.utils`. Any scikit-learn compatible estimator can also be passed as `base_estimator`.
+
+| Model | Constructor (`rdblearn.utils`) | `StandardPipeline` name | Classes | Regression output | Install |
+| --- | --- | --- | --- | --- | --- |
+| [TabPFN](https://github.com/PriorLabs/TabPFN) v2, v2.5, v2.6, v3, v3.5, v3.5-fast | `make_tabpfn_classifier(version="v3.5")` / `make_tabpfn_regressor` | `tabpfn-v3.5`, `tabpfn-v3.5-fast` | 10 (v2.x), 160 (v3.5) | median (default) or mean | included |
+| [Kumo-Tabular](https://huggingface.co/nvidia/Kumo-Tabular) small / medium / large | `KumoTabularWrapperClassifier(size="medium")` / `KumoTabularWrapperRegressor` | `kumo-tabular-small`, `kumo-tabular-medium`, `kumo-tabular-large` | any | median (default) or mean | included |
+| [TabICL](https://github.com/soda-inria/tabicl) v2 | `make_tabicl_classifier()` / `make_tabicl_regressor` | `tabicl-v2` | any | median (default) or mean | included |
+| [LimiX](https://github.com/limix-ldm/LimiX) | `LimiXWrapperClassifier(predictor)` / `LimiXWrapperRegressor` | — | 10 | single value | separate ([example](examples/rdblearn_limix_example.py)) |
+| [TabFM 1.0.0](https://huggingface.co/google/tabfm-1.0.0-pytorch) | `TabFMWrapperClassifier()` / `TabFMWrapperRegressor` | — | 10 | single value | separate ([example](examples/rdblearn_tabfm_example.py)) |
+
+TabPFN, Kumo-Tabular and TabICL are built with RDBLearn's defaults (`TABPFN_DEFAULT_CONFIG`, `TABICL_DEFAULT_CONFIG`, 8 estimators, KV cache on so `predict` only processes the test rows), and keyword arguments override them. When a task has more classes than a model supports, `RDBLearnClassifier` falls back to base-10-hierarchical inference.
 
 ### `TaskMetadata`
 Data structure containing task-specific information.
@@ -197,41 +218,6 @@ Data structure containing task-specific information.
 - `time_col`: Optional[str]
 - `task_type`: Optional[str]
 - `evaluation_metric`: Optional[str]
-
-### LimiX Integration
-`rdblearn.utils` provides wrappers to adapt LimiX predictors into scikit-learn compatible estimators.
-
-- **`LimiXWrapperClassifier(predictor)`**: Wrapper for classification tasks.
-    - `predictor`: An initialized `LimiXPredictor` instance.
-    - `fit(X, y)`: Stores training data for in-context inference.
-    - `predict(X)`: Returns class labels.
-    - `predict_proba(X)`: Returns class probabilities.
-
-- **`LimiXWrapperRegressor(predictor)`**: Wrapper for regression tasks.
-    - `predictor`: An initialized `LimiXPredictor` instance.
-    - `fit(X, y)`: Stores training data.
-    - `predict(X)`: Returns predicted values.
-
-**Note**: You must install LimiX separately and provide an initialized `LimiXPredictor` to these wrappers.
-
-### TabFM Integration
-`rdblearn.utils` also provides wrappers for Google's **TabFM 1.0.0** (`google/tabfm-1.0.0-pytorch`), a 1.6B-parameter in-context tabular foundation model.
-
-- **`TabFMWrapperClassifier(checkpoint_path=None, device="cuda", n_estimators=8, max_num_features=None, chunk_size="auto", dtype="float32")`**: Wrapper for classification tasks (max 10 classes, an architectural TabFM limit).
-    - `checkpoint_path`: local directory holding the `classification/` + `regression/` subfolders of the HF repo; `None` downloads from Hugging Face.
-    - `chunk_size="auto"`: enables TabFM's activation chunking (off by default in `tabfm==1.0.0`) with a constant cells-per-chunk budget, so wide DFS feature sets fit on 32 GB GPUs without dropping features.
-    - `dtype="bfloat16"`: halves activation memory via an fp32↔bf16 IO adapter (bf16 is TabFM's upstream design dtype); use for very wide/deep feature sets.
-    - `fit(X, y)` / `predict(X)` / `predict_proba(X)`: standard scikit-learn contract.
-- **`TabFMWrapperRegressor(...)`**: same options, for regression. Note TabFM's regression head emits a single scalar per row — unlike TabPFN there is no predictive distribution (no median/quantiles).
-
-Install TabFM without disturbing the pinned torch build:
-
-```bash
-pip install "jaxtyping<0.3" "typeguard<3" absl-py safetensors
-pip install tabfm --no-deps
-```
-
-The HF repo ships `model.safetensors` only, while the `tabfm==1.0.0` wheel loads `pytorch_model.bin`; the wrapper converts once automatically on first use. See `examples/rdblearn_tabfm_example.py`.
 
 ---
 
