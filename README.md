@@ -130,7 +130,7 @@ md = task.metadata
 pipeline = StandardPipeline(
     task_type="classification",
     hops=(2, 3, 4),
-    models=("tabpfn-v3.5", "tabicl-v2"),
+    models=("tabpfn-v3.5", "kumo-tabular-medium"),
 )
 pipeline.fit(task.train_df, task.val_df, md.target_col, dataset.rdb, md.key_mappings, md.time_col)
 print(pipeline.results_)              # validation score per (hop, model)
@@ -177,16 +177,17 @@ Scikit-learn compatible estimators for relational learning.
     - `rdb`: Optional RDB context (uses the one from `fit` if not provided).
 - **`predict_proba(X, rdb=None, **kwargs)`**: (Classifier only) Predict class probabilities.
 
-**Multiclass:** When a task has more classes than the base estimator supports, `RDBLearnClassifier` automatically uses **base-10-hierarchical** inference: the label space is decomposed into decimal digit heads (each head has at most 10 classes), then digit probabilities are fused into a full `(n_samples, C)` matrix. The cap is read from the estimator: TabPFN reports its checkpoint's limit (10 for v2.5, 160 for v3.5), TabICL handles any number of classes, an estimator can declare `rdblearn_max_classes` (`None` for unlimited), and anything else is assumed to take 10.
+**Multiclass:** When a task has more classes than the base estimator supports, `RDBLearnClassifier` automatically uses **base-10-hierarchical** inference: the label space is decomposed into decimal digit heads (each head has at most 10 classes), then digit probabilities are fused into a full `(n_samples, C)` matrix. The cap is read from the estimator: TabPFN reports its checkpoint's limit (10 for v2.5, 160 for v3.5), TabICL and Kumo-Tabular handle any number of classes, an estimator can declare `rdblearn_max_classes` (`None` for unlimited), and anything else is assumed to take 10.
 
 **DFS sessions:** `fit` opens a fastdfs `DFSSession` on the prepared RDB, so later `predict` / `predict_proba` calls without a new `rdb` reuse its feature plan and DuckDB tables instead of rebuilding them.
 
-### TabPFN and TabICL
+### TabPFN, Kumo-Tabular and TabICL
 `rdblearn.utils` builds foundation models with RDBLearn's defaults (KV cache on, so `predict` only runs the test rows):
 
 - **`make_tabpfn_classifier(version="v3.5", **overrides)`** / **`make_tabpfn_regressor(...)`**: `version` is one of `TABPFN_VERSIONS` (`"v2"`, `"v2.5"`, `"v2.6"`, `"v3"`, `"v3.5"`, `"v3.5-fast"`). Defaults come from `TABPFN_DEFAULT_CONFIG`.
+- **`KumoTabularWrapperClassifier(size="medium", device="cuda", n_estimators=8, estimator_batch_size=1, random_state=0)`** / **`KumoTabularWrapperRegressor(..., output_type="median")`**: NVIDIA [Kumo-Tabular](https://huggingface.co/nvidia/Kumo-Tabular) via `structured-data-models`. `size` is `"small"` (~28M parameters), `"medium"` (~62M) or `"large"` (~215M). `fit` caches the encoded training context. The classifier handles any number of classes natively. The regressor predicts 999 quantiles (`predict_quantiles`) and returns the median (or the mean with `output_type="mean"`).
 - **`make_tabicl_classifier(**overrides)`** / **`make_tabicl_regressor(...)`**: TabICL v2 with `TABICL_DEFAULT_CONFIG`.
-- **`TFM_FACTORIES`**: the model names accepted by `StandardPipeline` (`"tabpfn-v3.5"`, `"tabpfn-v3.5-fast"`, `"tabicl-v2"`).
+- **`TFM_FACTORIES`**: the model names accepted by `StandardPipeline`: `"tabpfn-v3.5"`, `"tabpfn-v3.5-fast"`, `"kumo-tabular-small"`, `"kumo-tabular-medium"`, `"kumo-tabular-large"`, `"tabicl-v2"`.
 
 ### `TaskMetadata`
 Data structure containing task-specific information.

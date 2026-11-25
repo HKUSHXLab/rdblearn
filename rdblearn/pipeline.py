@@ -66,7 +66,8 @@ class StandardPipeline:
         task_type: ``"classification"`` or ``"regression"``.
         hops: DFS depths to sweep; DFS itself runs once at ``max(hops)``.
         models: Names from ``rdblearn.utils.TFM_FACTORIES`` (e.g. ``"tabpfn-v3.5"``,
-            ``"tabicl-v2"``), or a dict of name -> zero-argument estimator factory.
+            ``"kumo-tabular-medium"``, ``"tabicl-v2"``), or a dict of name ->
+            zero-argument estimator factory.
         metric: Key of :data:`METRICS`; defaults to ``roc_auc`` / ``mae``.
         config: Base ``RDBLearnConfig``. Target augmentation and temporal differences
             are switched on and ``dfs.max_depth`` is set by the pipeline.
@@ -77,7 +78,7 @@ class StandardPipeline:
         self,
         task_type: str,
         hops: Sequence[int] = (2, 3, 4),
-        models: Union[Sequence[str], Dict[str, Callable[[], Any]]] = ("tabpfn-v3.5", "tabicl-v2"),
+        models: Union[Sequence[str], Dict[str, Callable[[], Any]]] = ("tabpfn-v3.5", "kumo-tabular-medium"),
         metric: Optional[str] = None,
         config: Optional[RDBLearnConfig] = None,
         model_params: Optional[Dict[str, Any]] = None,

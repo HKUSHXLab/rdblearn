@@ -187,14 +187,14 @@ class TestStandardPipeline(unittest.TestCase):
 
 @unittest.skipUnless(HAS_CUDA, "needs a GPU and foundation-model weights")
 class TestStandardPipelineWithFoundationModels(unittest.TestCase):
-    def test_tabpfn_v35_and_tabicl_v2(self):
+    def test_default_models_tabpfn_v35_and_kumo_medium(self):
         rdb, train, val, test = make_relational_data()
         pipe = StandardPipeline(
             task_type="classification", hops=(2, 3),
-            models=("tabpfn-v3.5", "tabicl-v2"), model_params={"n_estimators": 1},
+            model_params={"n_estimators": 1},
         )
         pipe.fit(train, val, "label", rdb, {"user_id": "users.user_id"}, "cutoff")
-        self.assertEqual(set(pipe.results_["model"]), {"tabpfn-v3.5", "tabicl-v2"})
+        self.assertEqual(set(pipe.results_["model"]), {"tabpfn-v3.5", "kumo-tabular-medium"})
         self.assertTrue(pipe.results_["val_roc_auc"].between(0, 1).all())
         self.assertTrue(0.0 <= pipe.score(test) <= 1.0)
 
