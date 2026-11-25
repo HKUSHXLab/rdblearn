@@ -119,7 +119,7 @@ See `examples/` for more detailed usage.
 
 1. One DFS at depth `max(hops)` on train and validation, with target augmentation and temporal differences on.
 2. Every (hop, model) pair is scored on validation. A hop-`h` candidate uses exactly the columns a DFS with `max_depth=h` would produce, taken from the single deep DFS.
-3. The best pair is refit on train + validation as a regular `RDBLearnClassifier` / `RDBLearnRegressor` (`pipeline.estimator_`).
+3. The best pair is refit on train + validation. The refit keeps its own featurizer and fastdfs session (`pipeline.featurizer_`), because the target history now includes validation, and the chosen foundation model (`pipeline.model_`).
 
 ```python
 from rdblearn import RDBDataset, StandardPipeline
@@ -194,8 +194,8 @@ DFS-depth × foundation-model selection on validation, then refit on train + val
     - `config`: base `RDBLearnConfig`. Target augmentation and temporal differences are always on, and `dfs.max_depth` is set by the pipeline.
     - `model_params`: keyword overrides passed to every named model factory (e.g. `{"device": "cuda"}`).
     - `regression_output_type`: `"median"` or `"mean"` point prediction for regressors; `None` keeps `config.regression_output_type` (`"median"`). The median suits `mae`; prefer `"mean"` when selecting on `rmse` or `r2`.
-- **`fit(train_df, val_df, target_col, rdb, key_mappings, cutoff_time_column=None)`**: runs the sweep and the refit. Sets `results_` (validation score per hop and model), `best_` (the selected pair) and `estimator_` (the refit `RDBLearnClassifier` / `RDBLearnRegressor`). A candidate that runs out of memory gets a NaN score and an `error` entry in `results_`; if the refit of the best pair runs out of memory, the next best pair is refit instead.
-- **`predict(df)`**, **`predict_proba(df)`**, **`score(df)`**: use the refit estimator; `score` returns the pipeline metric on `df`.
+- **`fit(train_df, val_df, target_col, rdb, key_mappings, cutoff_time_column=None)`**: runs the sweep and the refit. One fastdfs session serves every hop and model in the sweep. The refit opens a second session, because its target history includes validation. Sets `results_` (validation score per hop and model), `best_` (the selected pair), `featurizer_` (the refit relational database and session) and `model_` (the refit foundation model). A candidate that runs out of memory gets a NaN score and an `error` entry in `results_`; if the refit of the best pair runs out of memory, the next best pair is refit instead.
+- **`predict(df)`**, **`predict_proba(df)`**, **`score(df)`**: run rows through `featurizer_` and then `model_`. `score` returns the pipeline metric on `df`.
 
 <a id="supported-tfms"></a>
 

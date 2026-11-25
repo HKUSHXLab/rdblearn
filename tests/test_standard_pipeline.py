@@ -1,16 +1,18 @@
 import pickle
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 import fastdfs
 from fastdfs import DFSConfig
 from fastdfs.api import create_rdb
-from sklearn.base import BaseEstimator, ClassifierMixin
+from fastdfs.dfs import DFSSession
+from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 
 from rdblearn.config import RDBLearnConfig
 from rdblearn.constants import RDBLEARN_DEFAULT_CONFIG
-from rdblearn.estimator import RDBLearnClassifier
+from rdblearn.estimator import RDBLearnClassifier, RDBLearnRegressor
 from rdblearn.pipeline import StandardPipeline, planned_dfs_columns
 
 try:
@@ -73,6 +75,17 @@ class OutOfMemoryClassifier(FirstFeatureClassifier):
 class BrokenClassifier(FirstFeatureClassifier):
     def fit(self, X, y):
         raise ValueError("not an out-of-memory error")
+
+
+class RecordingRegressor(BaseEstimator, RegressorMixin):
+    """Records the ``output_type`` it is asked to predict."""
+
+    def fit(self, X, y):
+        return self
+
+    def predict(self, X, output_type=None):
+        self.output_type = output_type
+        return np.zeros(len(X))
 
 
 def make_relational_data(n_users=60, seed=0):
@@ -207,13 +220,16 @@ class TestStandardPipeline(unittest.TestCase):
         best = pipe.results_.loc[pipe.results_["val_roc_auc"].idxmax()]
         self.assertEqual((pipe.best_["hop"], pipe.best_["model"]), (best["hop"], best["model"]))
 
-        final = pipe.estimator_
+        final = pipe.featurizer_
         self.assertEqual(final.config.dfs.max_depth, pipe.best_["hop"])
         self.assertTrue(final.config.enable_target_augmentation)
         self.assertTrue(final.config.temporal_diff.enabled)
         self.assertEqual(len(final.history_df_), len(train) + len(val))
+        self.assertNotIsInstance(pipe.model_, (RDBLearnClassifier, RDBLearnRegressor))
+        self.assertIsInstance(pipe.model_.estimator, FirstFeatureClassifier)
         score = pipe.score(test)
         self.assertTrue(0.0 <= score <= 1.0)
+        self.assertEqual(pipe.featurizer_.dfs_session_._n_plan_calls, 1)
 
     def test_unknown_model_or_metric_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -265,7 +281,7 @@ class TestStandardPipeline(unittest.TestCase):
         self.assertFalse(pipe.results_["val_roc_auc"].isna().any())
         self.assertNotEqual(pipe.results_["val_roc_auc"].idxmax(), 2)
         self.assertEqual(pipe.best_["model"], "constant")
-        self.assertEqual(len(pipe.estimator_.history_df_), len(train) + len(val))
+        self.assertEqual(len(pipe.featurizer_.history_df_), len(train) + len(val))
 
     def test_every_candidate_out_of_memory_raises(self):
         rdb, train, val, _ = make_relational_data()
@@ -278,6 +294,46 @@ class TestStandardPipeline(unittest.TestCase):
         pipe = StandardPipeline("classification", hops=(2,), models={"bad": lambda: BrokenClassifier()})
         with self.assertRaises(ValueError):
             pipe.fit(train, val, "label", rdb, {"user_id": "users.user_id"}, "cutoff")
+
+    def test_does_not_construct_an_rdblearn_estimator(self):
+        rdb, train, val, _ = make_relational_data()
+        pipe = StandardPipeline(
+            "classification", hops=(2,), models={"col0": lambda: FirstFeatureClassifier(0)},
+        )
+        with patch.object(RDBLearnClassifier, "__init__", side_effect=AssertionError("no classifier")), \
+             patch.object(RDBLearnRegressor, "__init__", side_effect=AssertionError("no regressor")):
+            pipe.fit(train, val, "label", rdb, {"user_id": "users.user_id"}, "cutoff")
+        self.assertIsInstance(pipe.featurizer_.dfs_session_, DFSSession)
+
+    def test_sweep_session_is_not_the_refit_session(self):
+        rdb, train, val, test = make_relational_data()
+        seen = []
+        original = DFSSession.compute
+
+        def record(self, frame):
+            seen.append(id(self))
+            return original(self, frame)
+
+        pipe = StandardPipeline(
+            "classification", hops=(2, 3), models={"col0": lambda: FirstFeatureClassifier(0)},
+        )
+        with patch.object(DFSSession, "compute", record):
+            pipe.fit(train, val, "label", rdb, {"user_id": "users.user_id"}, "cutoff")
+            pipe.score(test)
+        # train + val share the sweep session; the refit and the test score share another.
+        self.assertEqual(seen[0], seen[1])
+        self.assertNotEqual(seen[0], seen[2])
+        self.assertTrue(all(i == seen[2] for i in seen[2:]))
+
+    def test_regression_output_type_reaches_the_model(self):
+        rdb, train, val, test = make_relational_data()
+        pipe = StandardPipeline(
+            "regression", hops=(2,), models={"rec": RecordingRegressor},
+            regression_output_type="mean",
+        )
+        pipe.fit(train, val, "label", rdb, {"user_id": "users.user_id"}, "cutoff")
+        pipe.score(test)
+        self.assertEqual(pipe.model_.estimator.output_type, "mean")
 
 
 @unittest.skipUnless(HAS_CUDA, "needs a GPU and foundation-model weights")

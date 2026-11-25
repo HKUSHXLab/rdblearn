@@ -1,12 +1,14 @@
 """Standard RDBLearn pipeline.
 
 1. Run DFS once at the deepest hop (``max(hops)``) on train and validation, with
-   target-history augmentation and temporal-difference features on.
+   target-history augmentation and temporal-difference features on. The fastdfs
+   session belongs to that featurizer, not to a model.
 2. Sweep every (hop, foundation model) pair on validation. A hop-``h`` candidate uses
    exactly the columns a DFS with ``max_depth=h`` would produce, taken from the deep DFS.
-3. Refit the best pair on train + validation as a regular RDBLearn estimator.
+   Models are fit on the preprocessed frame directly.
+3. Refit the best pair on train + validation: a new featurizer (its own session, because
+   the target history now includes validation) and one model.
 """
-import copy
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
@@ -19,7 +21,9 @@ from sklearn import metrics as skm
 
 from .config import RDBLearnConfig, TemporalDiffConfig
 from .constants import RDBLEARN_DEFAULT_CONFIG
-from .estimator import RDBLearnClassifier, RDBLearnRegressor
+from .featurizer import RDBFeaturizer
+from .modeling import FittedModel
+from .preprocessing import TabularPreprocessor
 from .utils import TFM_FACTORIES
 
 # name -> (score function taking (y_true, prediction, classes), greater is better)
@@ -82,6 +86,10 @@ class StandardPipeline:
     A candidate that runs out of memory is recorded with a NaN score and an ``error``
     in ``results_``; if the best candidate runs out of memory during the refit, the
     next best is refit instead.
+
+    After ``fit``, ``featurizer_`` holds the refit relational database and its fastdfs
+    session, and ``model_`` is the refit foundation model. ``predict`` runs new rows
+    through that featurizer and then the model.
     """
 
     def __init__(
@@ -112,9 +120,6 @@ class StandardPipeline:
 
     # ------------------------------------------------------------------ helpers
 
-    def _estimator_cls(self):
-        return RDBLearnClassifier if self.task_type == "classification" else RDBLearnRegressor
-
     def _model_factories(self) -> Dict[str, Callable[[], Any]]:
         if isinstance(self.models, dict):
             return dict(self.models)
@@ -135,19 +140,13 @@ class StandardPipeline:
             update["regression_output_type"] = self.regression_output_type
         return base.model_copy(update=update)
 
-    def _predictions(self, est, X_dfs: Optional[pd.DataFrame] = None, X: Optional[pd.DataFrame] = None):
-        if self.task_type == "classification":
-            if X_dfs is not None:
-                return np.asarray(est._predict_proba_from_dfs(X_dfs))
-            return np.asarray(est.predict_proba(X))
-        if X_dfs is not None:
-            return np.asarray(est._predict_from_dfs(X_dfs, "predict"))
-        return np.asarray(est.predict(X))
-
-    def _score(self, est, y, predictions) -> float:
+    def _score(self, model, y, predictions) -> float:
         fn, _ = METRICS[self.metric]
-        classes = getattr(est, "classes_", None)
-        return float(fn(np.asarray(y), predictions, classes))
+        return float(fn(np.asarray(y), predictions, getattr(model, "classes_", None)))
+
+    def _transformed(self, X: pd.DataFrame) -> pd.DataFrame:
+        X_dfs = self.featurizer_.features_for_prediction(X, None, self.featurizer_.compute)
+        return self.featurizer_.transform(X_dfs)
 
     @staticmethod
     def _free_gpu_memory():
@@ -172,6 +171,11 @@ class StandardPipeline:
             pass
         return isinstance(error, RuntimeError) and "out of memory" in str(error).lower()
 
+    def _fit_model(self, make, config, X, y) -> FittedModel:
+        model = FittedModel(make(), self.task_type, config)
+        model.fit(X, y)
+        return model
+
     # ------------------------------------------------------------------ API
 
     def fit(
@@ -184,21 +188,22 @@ class StandardPipeline:
         cutoff_time_column: Optional[str] = None,
     ):
         factories = self._model_factories()
-        est_cls = self._estimator_cls()
         max_hop = max(self.hops)
         self.target_col_ = target_col
 
         # 1. One DFS at the deepest hop, shared by every candidate.
         t0 = time.perf_counter()
-        featurizer = est_cls(base_estimator=None, config=self._config_for_depth(max_hop))
-        X_train, y_train = featurizer._fit_rdb(
+        featurizer = RDBFeaturizer(self._config_for_depth(max_hop), self.task_type)
+        X_train, y_train = featurizer.fit_rdb(
             train_df.drop(columns=[target_col]), train_df[target_col],
             rdb, key_mappings, cutoff_time_column,
         )
-        D_train = featurizer._compute_dfs(X_train)
-        D_val = featurizer._dfs_for_prediction(val_df.drop(columns=[target_col]), None)
+        D_train = featurizer.compute(X_train)
+        D_val = featurizer.features_for_prediction(
+            val_df.drop(columns=[target_col]), None, featurizer.compute
+        )
         y_val = val_df[target_col]
-        featurizer._close_dfs_session()
+        featurizer.close()
         self.dfs_seconds_ = time.perf_counter() - t0
 
         base_columns = [c for c in D_train.columns if c in X_train.columns]
@@ -215,27 +220,34 @@ class StandardPipeline:
             + ", ".join(f"hop {h}: {len(c) - len(base_columns)}" for h, c in self.hop_columns_.items())
         )
 
-        # 2. Sweep (hop x model) on validation.
+        # 2. Sweep (hop x model) on validation. The preprocessor depends on the hop's
+        #    columns, not on the model, so it is fit once per hop.
         rows = []
         for hop in self.hops:
             cols = self.hop_columns_[hop]
+            config = self._config_for_depth(hop)
+            preprocessor = TabularPreprocessor(
+                ag_config=config.ag_config,
+                temporal_diff_config=config.temporal_diff,
+                cutoff_time=cutoff_time_column,
+            )
+            Xt_train = preprocessor.fit(D_train[cols]).transform(D_train[cols])
+            Xt_val = preprocessor.transform(D_val[cols])
             for name, make in factories.items():
                 t0 = time.perf_counter()
                 score, error = float("nan"), None
-                cand = copy.copy(featurizer)
                 try:
-                    cand.base_estimator = make()
-                    cand._fit_from_dfs(D_train[cols], y_train)
-                    predictions = self._predictions(cand, X_dfs=D_val[cols])
-                    score = self._score(cand, y_val, predictions)
+                    model = self._fit_model(make, config, Xt_train, y_train)
+                    predictions = model.predict_proba(Xt_val) if self.task_type == "classification" else model.predict(Xt_val)
+                    score = self._score(model, y_val, np.asarray(predictions))
                     logger.info(f"hop={hop} model={name}: val {self.metric}={score:.4f}")
+                    del model
                 except Exception as e:
                     if not self._is_out_of_memory(e):
                         raise
                     error = f"{type(e).__name__}: {e}"
                     logger.warning(f"hop={hop} model={name}: out of memory, skipped ({error})")
                 finally:
-                    del cand
                     self._free_gpu_memory()
                 rows.append({
                     "hop": hop, "model": name, "n_features": len(cols) - len(base_columns),
@@ -243,8 +255,8 @@ class StandardPipeline:
                 })
         self.results_ = pd.DataFrame(rows)
 
-        # 3. Refit the best (hop, model) on train + validation, falling back to the next
-        #    best candidate if the refit runs out of memory.
+        # 3. Refit the best (hop, model) on train + validation. The history table now
+        #    includes validation, so this is a new featurizer and a new session.
         _, greater_is_better = METRICS[self.metric]
         score_col = f"val_{self.metric}"
         ranked = self.results_.dropna(subset=[score_col]).sort_values(
@@ -254,42 +266,48 @@ class StandardPipeline:
             raise RuntimeError(f"Every candidate ran out of memory:\n{self.results_}")
 
         train_val = pd.concat([train_df, val_df], ignore_index=True)
-        self.estimator_ = None
+        self.featurizer_ = None
+        self.model_ = None
         for _, row in ranked.iterrows():
             best = {"hop": int(row["hop"]), "model": row["model"], score_col: float(row[score_col])}
             logger.info(f"Best: {best}; refitting on train + validation.")
             t0 = time.perf_counter()
-            estimator = est_cls(
-                base_estimator=factories[best["model"]](),
-                config=self._config_for_depth(best["hop"]),
-            )
+            config = self._config_for_depth(best["hop"])
+            featurizer = RDBFeaturizer(config, self.task_type)
             try:
-                estimator.fit(
+                X, y = featurizer.fit_rdb(
                     train_val.drop(columns=[target_col]), train_val[target_col],
-                    rdb=rdb, key_mappings=key_mappings, cutoff_time_column=cutoff_time_column,
+                    rdb, key_mappings, cutoff_time_column,
                 )
+                Xt = featurizer.fit_preprocessor(featurizer.compute(X))
+                model = self._fit_model(factories[best["model"]], config, Xt, y)
             except Exception as e:
                 if not self._is_out_of_memory(e):
+                    featurizer.close()
                     raise
-                logger.warning(f"Refit of {best} ran out of memory ({type(e).__name__}: {e}); trying the next best.")
-                estimator._close_dfs_session()
-                del estimator
+                logger.warning(
+                    f"Refit of {best} ran out of memory ({type(e).__name__}: {e}); trying the next best."
+                )
+                featurizer.close()
                 self._free_gpu_memory()
                 continue
-            self.best_, self.estimator_ = best, estimator
+            self.best_ = best
+            self.featurizer_ = featurizer
+            self.model_ = model
             self.refit_seconds_ = time.perf_counter() - t0
             break
-        if self.estimator_ is None:
+        if self.model_ is None:
             raise RuntimeError("Every candidate ran out of memory during the refit on train + validation.")
         return self
 
     def predict(self, X: pd.DataFrame):
-        return self.estimator_.predict(X)
+        return self.model_.predict(self._transformed(X))
 
     def predict_proba(self, X: pd.DataFrame):
-        return self.estimator_.predict_proba(X)
+        return self.model_.predict_proba(self._transformed(X))
 
     def score(self, df: pd.DataFrame) -> float:
         """``metric`` of the refitted model on ``df`` (which must contain the target column)."""
-        X = df.drop(columns=[self.target_col_])
-        return self._score(self.estimator_, df[self.target_col_], self._predictions(self.estimator_, X=X))
+        X = self._transformed(df.drop(columns=[self.target_col_]))
+        predictions = self.model_.predict_proba(X) if self.task_type == "classification" else self.model_.predict(X)
+        return self._score(self.model_, df[self.target_col_], np.asarray(predictions))
