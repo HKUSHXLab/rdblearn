@@ -1,8 +1,9 @@
 """Single-config RelBench v1 recipe (one DFS hop, fixed TabPFN stack).
 
-Used by the RelArena model wrapper and by standalone callers that do not want
-``StandardPipeline``'s internal hop×model sweep. RelArena owns hop selection
-via a ``fixed_grid`` over ``max_depth`` ∈ {2, 3, 4}.
+Used by the RelArena model wrapper. RelArena owns hop selection via a
+``fixed_grid`` over ``max_depth`` ∈ {2, 3, 4}. Deep Feature Synthesis runs once
+at ``DFS_CACHE_MAX_DEPTH`` per ``(db, train)`` and shallower hops slice that
+matrix (built-in RelArena ``rdblearn`` style).
 """
 
 from __future__ import annotations
@@ -18,14 +19,15 @@ from loguru import logger
 from .config import RDBLearnConfig, TemporalDiffConfig
 from .constants import RDBLEARN_DEFAULT_CONFIG
 from .context import prepare_hard_pool_fit
-from .featurizer import RDBFeaturizer
+from .dfs_depth_cache import DEPTH_CACHE, DFS_CACHE_MAX_DEPTH, TrainDFSBundle
 from .modeling import FittedModel
-from .text import AnchorTextEncoder, merge_transform_text
+from .text import merge_transform_text
 from .utils import TFM_FACTORIES
 
 DEFAULT_MODEL = "tabpfn-v3.5"
 DEFAULT_RECENCY_WINDOW = 800_000
-DEFAULT_HOPS = (2, 3, 4)
+#: Hop grid with default depth first (RelArena truncates ``fixed_grid`` at ``n_trials``).
+DEFAULT_HOPS = (4, 2, 3)
 
 
 def database_to_rdb(db, *, name: str = "relbench-v1") -> RDB:
@@ -95,13 +97,17 @@ def default_device() -> str:
 
 
 class RelBenchV1Estimator:
-    """Fit / predict one RelBench v1 config: DFS @ ``max_depth`` + hub/period/TPR knobs."""
+    """Fit / predict one hop of the RelBench v1 recipe.
+
+    DFS at ``DFS_CACHE_MAX_DEPTH`` is shared across hop trials via
+    :data:`DEPTH_CACHE`; this instance only slices columns and fits the TFM.
+    """
 
     def __init__(
         self,
         task_type: str,
         *,
-        max_depth: int = 2,
+        max_depth: int = 4,
         model: str = DEFAULT_MODEL,
         hub: bool = True,
         period: bool = True,
@@ -115,6 +121,7 @@ class RelBenchV1Estimator:
         seed: int = 0,
         model_params: Optional[Dict[str, Any]] = None,
         config: Optional[RDBLearnConfig] = None,
+        cache_max_depth: int = DFS_CACHE_MAX_DEPTH,
     ) -> None:
         if task_type not in ("classification", "regression"):
             raise ValueError(f"task_type must be classification or regression, got {task_type!r}")
@@ -128,9 +135,14 @@ class RelBenchV1Estimator:
             raise ValueError(f"hurdle must be None or 'auto', got {hurdle!r}")
         if model not in TFM_FACTORIES:
             raise ValueError(f"Unknown model {model!r}; expected one of {sorted(TFM_FACTORIES)}")
+        if int(max_depth) > int(cache_max_depth):
+            raise ValueError(
+                f"max_depth={max_depth} exceeds cache_max_depth={cache_max_depth}"
+            )
 
         self.task_type = task_type
         self.max_depth = int(max_depth)
+        self.cache_max_depth = int(cache_max_depth)
         self.model_name = model
         self.hub = bool(hub)
         self.period = bool(period)
@@ -201,9 +213,9 @@ class RelBenchV1Estimator:
         return self._append_period(self._append_hub(feats, X), X)
 
     def _attach_text(self, feats: pd.DataFrame, X: pd.DataFrame) -> pd.DataFrame:
-        if self.text_encoder != "tfidf" or self.text_encoder_ is None:
+        if self.text_encoder != "tfidf" or self.bundle_.text_encoder is None:
             return feats
-        return self.text_encoder_.transform(self.rdb_, feats, X)
+        return self.bundle_.text_encoder.transform(self.rdb_, feats, X)
 
     def _fit_tfm(self, X: pd.DataFrame, y, *, context_time: Optional[np.ndarray]) -> FittedModel:
         config = self._rdb_config()
@@ -253,6 +265,8 @@ class RelBenchV1Estimator:
         cutoff_time_column: Optional[str] = None,
         *,
         task_id: Optional[str] = None,
+        db: Any = None,
+        train_key: Any = None,
     ) -> "RelBenchV1Estimator":
         if task_id is not None:
             self.task_id = task_id
@@ -261,49 +275,66 @@ class RelBenchV1Estimator:
         self.key_mappings_ = key_mappings
         self.cutoff_time_column_ = cutoff_time_column
 
-        config = self._rdb_config()
-        featurizer = RDBFeaturizer(config, self.task_type)
-        X_train, y_train = featurizer.fit_rdb(
-            train_df.drop(columns=[target_col]),
-            train_df[target_col],
-            rdb,
-            key_mappings,
-            cutoff_time_column,
+        # Scope cache by RelBench Database identity when provided (inner vs outer).
+        scope_db = db if db is not None else rdb
+        bundle: TrainDFSBundle = DEPTH_CACHE.train_bundle(
+            db=scope_db,
+            train_df=train_df,
+            target_col=target_col,
+            rdb=rdb,
+            key_mappings=key_mappings,
+            cutoff_time_column=cutoff_time_column,
+            task_type=self.task_type,
+            hub=self.hub,
+            period=self.period,
+            task_id=self.task_id,
+            max_peer_features=self.max_peer_features,
+            text_encoder=self.text_encoder,
+            append_extras=self._append_extras,
+            cache_max_depth=self.cache_max_depth,
+            config=self.config,
+            train_key=train_key,
         )
-        D_train = featurizer.compute(X_train)
-        D_train = self._append_extras(D_train, X_train)
+        self.bundle_ = bundle
+        self.featurizer_ = bundle.featurizer
 
-        self.text_encoder_ = None
-        if self.text_encoder == "tfidf":
-            self.text_encoder_ = AnchorTextEncoder().fit(rdb, X_train, key_mappings)
-            D_train = self._attach_text(D_train, X_train)
+        if self.max_depth not in bundle.hop_columns:
+            raise ValueError(
+                f"No hop column plan for max_depth={self.max_depth}; "
+                f"have {sorted(bundle.hop_columns)}"
+            )
+        cols = [c for c in bundle.hop_columns[self.max_depth] if c in bundle.D_train.columns]
+        D = bundle.D_train[cols]
 
-        text_cols = [c for c in D_train.columns if str(c).endswith("__raw_text")]
-        model_cols = [c for c in D_train.columns if c not in text_cols]
-        Xt = featurizer.fit_preprocessor(D_train[model_cols])
+        text_cols = [c for c in D.columns if str(c).endswith("__raw_text")]
+        model_cols = [c for c in D.columns if c not in text_cols]
+        # Own preprocessor per hop so sequential RelArena trials do not clobber each other.
+        Xt = bundle.featurizer.fit_preprocessor(D[model_cols])
+        self.preprocessor_ = bundle.featurizer.preprocessor_
         if text_cols:
-            # Drop any prior text placeholders, then re-attach once.
             drop = [c for c in Xt.columns if str(c).endswith("__raw_text")]
             if drop:
                 Xt = Xt.drop(columns=drop)
             Xt = pd.concat(
-                [Xt.reset_index(drop=True), D_train[text_cols].reset_index(drop=True).astype("string")],
+                [Xt.reset_index(drop=True), D[text_cols].reset_index(drop=True).astype("string")],
                 axis=1,
             )
 
         self.feature_columns_ = list(Xt.columns)
         train_times = (
-            pd.to_datetime(X_train[cutoff_time_column]).to_numpy()
-            if cutoff_time_column and cutoff_time_column in X_train.columns
+            pd.to_datetime(bundle.X_train[cutoff_time_column]).to_numpy()
+            if cutoff_time_column and cutoff_time_column in bundle.X_train.columns
             else None
         )
-        self.model_ = self._fit_tfm(Xt, y_train, context_time=train_times)
-        self.featurizer_ = featurizer
+        self.model_ = self._fit_tfm(Xt, bundle.y_train, context_time=train_times)
         return self
 
     def _transformed(self, X: pd.DataFrame) -> pd.DataFrame:
-        X_dfs = self.featurizer_.features_for_prediction(X, None, self.featurizer_.compute)
-        X_dfs = self._append_extras(X_dfs, X)
+        X_dfs = self.bundle_.features_for_prediction(
+            X,
+            append_extras=self._append_extras,
+            attach_text=self._attach_text,
+        )
         wanted = [c for c in self.feature_columns_ if not str(c).endswith("__raw_text")]
         cols = [c for c in wanted if c in X_dfs.columns]
         missing = [c for c in wanted if c not in X_dfs.columns]
@@ -311,12 +342,12 @@ class RelBenchV1Estimator:
         for c in missing:
             frame[c] = np.nan
         frame = frame[wanted]
-        Xt = self.featurizer_.transform(frame)
-        with_text = self._attach_text(frame, X)
-        text_cols = [c for c in with_text.columns if c.endswith("__raw_text")]
-        if text_cols:
+        Xt = self.preprocessor_.transform(frame)
+        text_wanted = [c for c in self.feature_columns_ if str(c).endswith("__raw_text")]
+        if text_wanted:
+            text_frame = X_dfs.reindex(columns=text_wanted)
             Xt = pd.concat(
-                [Xt.reset_index(drop=True), with_text[text_cols].reset_index(drop=True).astype("string")],
+                [Xt.reset_index(drop=True), text_frame.reset_index(drop=True).astype("string")],
                 axis=1,
             )
         return Xt

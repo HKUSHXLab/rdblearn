@@ -24,10 +24,10 @@ class TestRelArenaModelRegistration(unittest.TestCase):
         from rdblearn.relarena_model import RELBENCH_V1_SPACE, RDBLearnRelBenchV1Model
         from relarena_core.registry import registry
 
-        self.assertEqual(RELBENCH_V1_SPACE.default_overrides, {"max_depth": 2})
+        self.assertEqual(RELBENCH_V1_SPACE.default_overrides, {"max_depth": 4})
         self.assertEqual(
             RELBENCH_V1_SPACE.fixed_grid,
-            [{"max_depth": 2}, {"max_depth": 3}, {"max_depth": 4}],
+            [{"max_depth": 4}, {"max_depth": 2}, {"max_depth": 3}],
         )
         self.assertIs(registry.get("rdblearn-relbench-v1-2026-11-26"), RDBLearnRelBenchV1Model)
         self.assertIs(registry.get("rdblearn-relbench-v1-latest"), RDBLearnRelBenchV1Model)

@@ -31,9 +31,9 @@ from .relbench_v1 import (
 
 _NAME = "rdblearn-relbench-v1-2026-11-26"
 
-#: Hop-only grid. Default depth 2 first so ``n_trials`` truncation still reports it.
+#: Hop-only grid. Default depth 4 first so ``n_trials`` truncation still reports it.
 RELBENCH_V1_SPACE = SearchSpace(
-    default_overrides={"max_depth": 2},
+    default_overrides={"max_depth": 4},
     fixed_grid=[{"max_depth": d} for d in DEFAULT_HOPS],
 )
 
@@ -76,7 +76,7 @@ class RDBLearnRelBenchV1Model(RelArenaModel):
         time_limit: float | None = None,
     ) -> None:
         del val_table, time_limit  # selection is harness-owned; no early stopping.
-        depth = int(self.config.get("max_depth", 2))
+        depth = int(self.config.get("max_depth", 4))
         task_type = _task_type_name(task)
         task_id = _resolve_task_id(self.run_identity)
         train_df = label_frame(train_table.df, task.entity_col)
@@ -102,6 +102,8 @@ class RDBLearnRelBenchV1Model(RelArenaModel):
             key_mappings_for_task(task, db),
             task.time_col,
             task_id=task_id,
+            db=db,  # scopes the process-level max-depth DFS cache
+            train_key=id(train_table),  # stable across hop trials (not id of copied df)
         )
         self._depth = depth
         self._task_type = task.task_type
