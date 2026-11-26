@@ -60,8 +60,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Auto hurdle (regression) for the RelBench v1 / StandardPipeline recipe
+# Auto hurdle (regression) for the RelBench v1 recipe
 relbench = [
+    "tabpfn-extensions",
+]
+# RelArena model plugin (hop-only search space). Install relarena / relarena-core separately.
+relarena = [
     "tabpfn-extensions",
 ]
 # Development dependencies
@@ -73,6 +77,9 @@ dev = [
     "flake8>=5.0.0",
     "mypy>=1.0.0",
 ]
+
+[project.entry-points."relarena.models"]
+rdblearn_relbench_v1 = "rdblearn.relarena_model"
 
 
 [project.urls]
