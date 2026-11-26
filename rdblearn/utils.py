@@ -1,4 +1,4 @@
-from typing import Optional, Union, Tuple
+from typing import Any, Dict, Optional, Union, Tuple
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
@@ -65,6 +65,9 @@ class LimiXWrapperClassifier(BaseEstimator, ClassifierMixin):
 class LimiXWrapperRegressor(BaseEstimator, RegressorMixin):
     """
     A scikit-learn compatible wrapper for the LimiX regressor.
+
+    LimiX's regression head predicts one value per row (averaged over its ensemble),
+    so unlike TabPFN, TabICL and Kumo-Tabular there is no median to choose.
     """
     
     def __init__(self, predictor):
@@ -312,3 +315,240 @@ class TabFMWrapperRegressor(_TabFMWrapperBase, RegressorMixin):
     """
 
     _task_type = "regression"
+
+
+# ---------------------------------------------------------------------------
+# TabPFN (tabpfn>=9.0.0) and TabICL (tabicl>=2.0.0) model selection
+# ---------------------------------------------------------------------------
+
+TABPFN_VERSIONS = ("v2", "v2.5", "v2.6", "v3", "v3.5", "v3.5-fast")
+
+
+def _make_tabpfn(task: str, version: str, overrides: Dict[str, Any]):
+    from tabpfn import TabPFNClassifier, TabPFNRegressor
+    from tabpfn.constants import ModelVersion
+
+    from .constants import TABPFN_DEFAULT_CONFIG
+
+    if version not in TABPFN_VERSIONS:
+        raise ValueError(f"Unknown TabPFN version {version!r}; expected one of {TABPFN_VERSIONS}")
+    est_cls = TabPFNClassifier if task == "classification" else TabPFNRegressor
+    return est_cls.create_default_for_version(
+        ModelVersion(version), **{**TABPFN_DEFAULT_CONFIG, **overrides}
+    )
+
+
+def make_tabpfn_classifier(version: str = "v3.5", **overrides):
+    """Build a ``TabPFNClassifier`` for ``version`` with RDBLearn's defaults.
+
+    ``version`` is one of :data:`TABPFN_VERSIONS`: ``"v3.5"`` is TabPFN-3.5 and
+    ``"v3.5-fast"`` the smaller TabPFN-3.5-Fast. Defaults come from
+    ``TABPFN_DEFAULT_CONFIG`` (including ``fit_mode="fit_with_cache"``);
+    ``overrides`` take precedence.
+    """
+    return _make_tabpfn("classification", version, overrides)
+
+
+def make_tabpfn_regressor(version: str = "v3.5", **overrides):
+    """Build a ``TabPFNRegressor``; see :func:`make_tabpfn_classifier`."""
+    return _make_tabpfn("regression", version, overrides)
+
+
+def make_tabicl_classifier(**overrides):
+    """Build a TabICL v2 ``TabICLClassifier`` with ``TABICL_DEFAULT_CONFIG`` (KV cache on)."""
+    from tabicl import TabICLClassifier
+
+    from .constants import TABICL_DEFAULT_CONFIG
+
+    return TabICLClassifier(**{**TABICL_DEFAULT_CONFIG, **overrides})
+
+
+def make_tabicl_regressor(**overrides):
+    """Build a TabICL v2 ``TabICLRegressor``; see :func:`make_tabicl_classifier`."""
+    from tabicl import TabICLRegressor
+
+    from .constants import TABICL_DEFAULT_CONFIG
+
+    return TabICLRegressor(**{**TABICL_DEFAULT_CONFIG, **overrides})
+
+
+# ---------------------------------------------------------------------------
+# NVIDIA Kumo-Tabular (nvidia/Kumo-Tabular, structured-data-models>=0.2.1)
+# ---------------------------------------------------------------------------
+
+KUMO_TABULAR_SIZES = ("small", "medium", "large")
+
+
+def _kumo_feature_stypes(X: pd.DataFrame) -> Dict[str, str]:
+    stypes = {}
+    for col in X.columns:
+        dtype = X[col].dtype
+        if isinstance(dtype, pd.CategoricalDtype) or pd.api.types.is_object_dtype(dtype):
+            stypes[col] = "categorical"
+        else:
+            stypes[col] = "numerical"
+    return stypes
+
+
+class _KumoTabularWrapperBase(BaseEstimator):
+    """Shared Kumo-Tabular logic. Use the Classifier/Regressor subclasses."""
+
+    _task_type = "classification"
+
+    def __init__(
+        self,
+        size: str = "medium",
+        device: str = "cuda",
+        n_estimators: int = 8,
+        estimator_batch_size: Optional[int] = 1,
+        random_state: Optional[int] = 0,
+    ):
+        self.size = size
+        self.device = device
+        self.n_estimators = n_estimators
+        self.estimator_batch_size = estimator_batch_size
+        self.random_state = random_state
+
+    def _as_frame(self, X: Union[pd.DataFrame, np.ndarray]) -> pd.DataFrame:
+        if isinstance(X, pd.DataFrame):
+            return X.rename(columns=str)
+        X = np.asarray(X)
+        return pd.DataFrame(X, columns=[f"f{i}" for i in range(X.shape[1])])
+
+    def _table(self, X: pd.DataFrame):
+        import sdm
+
+        return sdm.TableTensor.from_pandas(X, stypes=self.feature_stypes_, device=self.device)
+
+    def _fit_context(self, X: Union[pd.DataFrame, np.ndarray], y_frame: pd.DataFrame, y_stype: str):
+        import sdm
+        import torch
+
+        if self.size not in KUMO_TABULAR_SIZES:
+            raise ValueError(f"Unknown Kumo-Tabular size {self.size!r}; expected one of {KUMO_TABULAR_SIZES}")
+
+        X = self._as_frame(X)
+        self.feature_stypes_ = _kumo_feature_stypes(X)
+        # Loaded per instance: the fitted context cache lives on the model object.
+        self.model_ = sdm.models.KumoTabular(task=self._task_type, size=self.size, device=self.device)
+        generator = None
+        if self.random_state is not None:
+            generator = torch.Generator(device=self.device).manual_seed(int(self.random_state))
+        # Encodes the context rows once and caches their keys/values; predict()
+        # then only runs the query rows against the cache.
+        self.model_.fit(
+            x=self._table(X),
+            y=sdm.TableTensor.from_pandas(y_frame, stypes={"target": y_stype}, device=self.device),
+            num_estimators=self.n_estimators,
+            estimator_batch_size=self.estimator_batch_size,
+            generator=generator,
+        )
+        return self
+
+    def _predict_table(self, X: Union[pd.DataFrame, np.ndarray]):
+        check_is_fitted(self, ["model_"])
+        return self.model_.predict(self._table(self._as_frame(X)))
+
+
+class KumoTabularWrapperClassifier(_KumoTabularWrapperBase, ClassifierMixin):
+    """Scikit-learn compatible wrapper for NVIDIA Kumo-Tabular classification.
+
+    ``size`` selects ``"small"`` (~28M params), ``"medium"`` (~62M, default) or
+    ``"large"`` (~215M). Weights download from ``nvidia/Kumo-Tabular`` on first use.
+    ``fit`` caches the encoded context, so repeated ``predict_proba`` calls only
+    process the query rows. Any number of classes is handled natively (ECOC), so
+    RDBLearn does not apply its base-10-hierarchical decomposition.
+    """
+
+    _task_type = "classification"
+    rdblearn_max_classes = None
+
+    def fit(self, X: Union[pd.DataFrame, np.ndarray], y: Union[pd.Series, np.ndarray]):
+        from sklearn.preprocessing import LabelEncoder
+
+        le = LabelEncoder()
+        codes = le.fit_transform(np.asarray(y))
+        self.classes_ = le.classes_
+        return self._fit_context(X, pd.DataFrame({"target": codes.astype(np.int64)}), "categorical")
+
+    def predict_proba(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
+        out = self._predict_table(X)
+        values = out.numerical.float().cpu().numpy()
+        # Output columns are named by class code; order them to match classes_.
+        codes = [int(c) for c in out.columns["numerical"]]
+        proba = np.zeros((values.shape[0], len(self.classes_)), dtype=np.float64)
+        proba[:, codes] = values
+        return proba
+
+    def predict(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
+        return self.classes_[np.argmax(self.predict_proba(X), axis=1)]
+
+
+class KumoTabularWrapperRegressor(_KumoTabularWrapperBase, RegressorMixin):
+    """Scikit-learn compatible wrapper for NVIDIA Kumo-Tabular regression.
+
+    The model predicts 999 quantiles (``q001`` .. ``q999``). ``output_type="median"``
+    (default) returns ``q500``; ``"mean"`` returns the average over all quantiles.
+    See :class:`KumoTabularWrapperClassifier` for ``size`` and caching.
+    """
+
+    _task_type = "regression"
+
+    def __init__(
+        self,
+        size: str = "medium",
+        device: str = "cuda",
+        n_estimators: int = 8,
+        estimator_batch_size: Optional[int] = 1,
+        random_state: Optional[int] = 0,
+        output_type: str = "median",
+    ):
+        super().__init__(
+            size=size,
+            device=device,
+            n_estimators=n_estimators,
+            estimator_batch_size=estimator_batch_size,
+            random_state=random_state,
+        )
+        self.output_type = output_type
+
+    def fit(self, X: Union[pd.DataFrame, np.ndarray], y: Union[pd.Series, np.ndarray]):
+        if self.output_type not in ("median", "mean"):
+            raise ValueError(f"output_type must be 'median' or 'mean', got {self.output_type!r}")
+        y_frame = pd.DataFrame({"target": np.asarray(y, dtype=np.float64)})
+        return self._fit_context(X, y_frame, "numerical")
+
+    def predict_quantiles(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
+        """All 999 predicted quantiles, shape (n_samples, 999), levels 0.001 .. 0.999."""
+        return self._predict_table(X).numerical.double().cpu().numpy()
+
+    def predict(self, X: Union[pd.DataFrame, np.ndarray], output_type: Optional[str] = None) -> np.ndarray:
+        """Point prediction: ``output_type`` (default ``self.output_type``) is ``"median"`` or ``"mean"``."""
+        output_type = output_type or self.output_type
+        if output_type not in ("median", "mean"):
+            raise ValueError(f"output_type must be 'median' or 'mean', got {output_type!r}")
+        quantiles = self.predict_quantiles(X)
+        if output_type == "median":
+            return quantiles[:, 499]
+        return quantiles.mean(axis=1)
+
+
+# Named foundation models for ``StandardPipeline``: name -> (classifier factory, regressor factory).
+TFM_FACTORIES = {
+    "tabpfn-v3.5": (
+        lambda **kw: make_tabpfn_classifier("v3.5", **kw),
+        lambda **kw: make_tabpfn_regressor("v3.5", **kw),
+    ),
+    "tabpfn-v3.5-fast": (
+        lambda **kw: make_tabpfn_classifier("v3.5-fast", **kw),
+        lambda **kw: make_tabpfn_regressor("v3.5-fast", **kw),
+    ),
+    "tabicl-v2": (make_tabicl_classifier, make_tabicl_regressor),
+    **{
+        f"kumo-tabular-{size}": (
+            lambda size=size, **kw: KumoTabularWrapperClassifier(size=size, **kw),
+            lambda size=size, **kw: KumoTabularWrapperRegressor(size=size, **kw),
+        )
+        for size in KUMO_TABULAR_SIZES
+    },
+}

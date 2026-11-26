@@ -51,10 +51,12 @@ dependencies = [
     "kditransform",
     "hyperopt",
     "autogluon.tabular>=1.5.0",
-    "tabpfn>=6.3.0",
+    "tabpfn>=9.0.0",
+    "tabicl>=2.1.0",
+    "structured-data-models>=0.2.1",
     "relbench==2.1.2",
     "wandb>=0.24.0",
-    "fastdfs==0.2.1",
+    "fastdfs==1.3",
 ]
 
 [project.optional-dependencies]

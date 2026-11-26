@@ -27,7 +27,8 @@
 
 * 🔧 **FastDFS** - Efficient Deep Feature Synthesis for automated multi-table flattening.
 * 🤖 **RDBLearn Estimators** - Scikit-learn compatible `RDBLearnClassifier` and `RDBLearnRegressor` that integrate DFS and single-table models.
-* ⚡ **Foundation Models** - Seamless integration with TabPFN and other foundation models for single table prediction tasks.
+* ⚡ **Foundation Models** - Seamless integration with TabPFN and other foundation models for single table prediction tasks (see [Supported TFMs](#supported-tfms)).
+* 🏁 **Standard Pipeline** - `StandardPipeline` runs one DFS, selects the DFS depth and foundation model on validation, refits on train + validation and reports test performance.
 
 ---
 
@@ -112,6 +113,33 @@ predictions = reg.predict(X=X_test)
 
 See `examples/` for more detailed usage.
 
+### Standard Pipeline
+
+`StandardPipeline` picks the DFS depth (hop) and the foundation model on validation, then refits on train + validation:
+
+1. One DFS at depth `max(hops)` on train and validation, with target augmentation and temporal differences on.
+2. Every (hop, model) pair is scored on validation. A hop-`h` candidate uses exactly the columns a DFS with `max_depth=h` would produce, taken from the single deep DFS.
+3. The best pair is refit on train + validation. The refit keeps its own featurizer and fastdfs session (`pipeline.featurizer_`), because the target history now includes validation, and the chosen foundation model (`pipeline.model_`).
+
+```python
+from rdblearn import RDBDataset, StandardPipeline
+
+dataset = RDBDataset.from_relbench("rel-trial", for_task="study-outcome")
+task = dataset.tasks["study-outcome"]
+md = task.metadata
+
+pipeline = StandardPipeline(
+    task_type="classification",
+    hops=(2, 3, 4),
+    models=("tabpfn-v3.5", "kumo-tabular-medium"),
+)
+pipeline.fit(task.train_df, task.val_df, md.target_col, dataset.rdb, md.key_mappings, md.time_col)
+print(pipeline.results_)              # validation score per (hop, model)
+print(pipeline.score(task.test_df))   # test score of the refit model
+```
+
+See `examples/rdblearn_standard_pipeline.py`.
+
 ---
 
 <a id="core-api-reference"></a>
@@ -139,6 +167,7 @@ Scikit-learn compatible estimators for relational learning.
         - `enable_target_augmentation` (bool, default True): Augment the RDB with the full training target history table, enabling DFS to derive entity-level target aggregate features (e.g., entity mean). Requires `cutoff_time_column` to be set during `fit`.
         - `temporal_diff` (dict or TemporalDiffConfig, default `{"enabled": True}`): Convert DFS-generated epoch-time columns into temporal difference features relative to the cutoff time. Supports `enabled` (bool) and `exclude_columns` (list of column names to skip).
         - `predict_batch_size` (int, default 5000): Batch size for prediction.
+        - `regression_output_type` (str or None, default `"median"`): Point prediction requested from regressors that predict a distribution (TabPFN, TabICL, Kumo-Tabular), passed as `output_type` to any base estimator whose `predict` takes it. `None` keeps the estimator's own default (the mean for TabPFN and TabICL). LimiX and TabFM predict a single value per row, so this does not apply to them.
 - **`fit(X, y, rdb, key_mappings, cutoff_time_column=None, **kwargs)`**:
     - `X`: Training features (DataFrame).
     - `y`: Training labels (Series).
@@ -150,7 +179,38 @@ Scikit-learn compatible estimators for relational learning.
     - `rdb`: Optional RDB context (uses the one from `fit` if not provided).
 - **`predict_proba(X, rdb=None, **kwargs)`**: (Classifier only) Predict class probabilities.
 
-**Multiclass (>10 classes):** For classification tasks with more than 10 training classes, `RDBLearnClassifier` automatically uses **base-10-hierarchical** inference: the label space is decomposed into decimal digit heads (each head has at most 10 classes, compatible with TabPFN), then digit probabilities are fused into a full `(n_samples, C)` matrix. No extra configuration is required. Tasks with **C ≤ 10** use a single model on the original target.
+**Multiclass:** When a task has more classes than the base estimator supports, `RDBLearnClassifier` automatically uses **base-10-hierarchical** inference: the label space is decomposed into decimal digit heads (each head has at most 10 classes), then digit probabilities are fused into a full `(n_samples, C)` matrix. The cap is read from the estimator: TabPFN reports its checkpoint's limit (10 for v2.5, 160 for v3.5), TabICL and Kumo-Tabular handle any number of classes, an estimator can declare `rdblearn_max_classes` (`None` for unlimited), and anything else is assumed to take 10.
+
+**DFS sessions:** `fit` opens a fastdfs `DFSSession` on the prepared RDB, so later `predict` / `predict_proba` calls without a new `rdb` reuse its feature plan and DuckDB tables instead of rebuilding them.
+
+### `StandardPipeline`
+DFS-depth × foundation-model selection on validation, then refit on train + validation.
+
+- **`__init__(task_type, hops=(2, 3, 4), models=("tabpfn-v3.5", "kumo-tabular-medium"), metric=None, config=None, model_params=None)`**:
+    - `task_type`: `"classification"` or `"regression"`.
+    - `hops`: DFS depths to sweep. DFS runs once at `max(hops)`.
+    - `models`: names from the `StandardPipeline` column of [Supported TFMs](#supported-tfms), or a dict of name → zero-argument estimator factory.
+    - `metric`: one of `roc_auc`, `accuracy`, `log_loss` (classification) or `mae`, `rmse`, `r2` (regression). Defaults to `roc_auc` / `mae`.
+    - `config`: base `RDBLearnConfig`. Target augmentation and temporal differences are always on, and `dfs.max_depth` is set by the pipeline.
+    - `model_params`: keyword overrides passed to every named model factory (e.g. `{"device": "cuda"}`).
+    - `regression_output_type`: `"median"` or `"mean"` point prediction for regressors; `None` keeps `config.regression_output_type` (`"median"`). The median suits `mae`; prefer `"mean"` when selecting on `rmse` or `r2`.
+- **`fit(train_df, val_df, target_col, rdb, key_mappings, cutoff_time_column=None)`**: runs the sweep and the refit. One fastdfs session serves every hop and model in the sweep. The refit opens a second session, because its target history includes validation. Sets `results_` (validation score per hop and model), `best_` (the selected pair), `featurizer_` (the refit relational database and session) and `model_` (the refit foundation model). A candidate that runs out of memory gets a NaN score and an `error` entry in `results_`; if the refit of the best pair runs out of memory, the next best pair is refit instead.
+- **`predict(df)`**, **`predict_proba(df)`**, **`score(df)`**: run rows through `featurizer_` and then `model_`. `score` returns the pipeline metric on `df`.
+
+<a id="supported-tfms"></a>
+
+### Supported TFMs
+Tabular foundation models with ready-made constructors in `rdblearn.utils`. Any scikit-learn compatible estimator can also be passed as `base_estimator`.
+
+| Model | Constructor (`rdblearn.utils`) | `StandardPipeline` name | Classes | Regression output | Install |
+| --- | --- | --- | --- | --- | --- |
+| [TabPFN](https://github.com/PriorLabs/TabPFN) v2, v2.5, v2.6, v3, v3.5, v3.5-fast | `make_tabpfn_classifier(version="v3.5")` / `make_tabpfn_regressor` | `tabpfn-v3.5`, `tabpfn-v3.5-fast` | 10 (v2.x), 160 (v3.5) | median (default) or mean | included |
+| [Kumo-Tabular](https://huggingface.co/nvidia/Kumo-Tabular) small / medium / large | `KumoTabularWrapperClassifier(size="medium")` / `KumoTabularWrapperRegressor` | `kumo-tabular-small`, `kumo-tabular-medium`, `kumo-tabular-large` | any | median (default) or mean | included |
+| [TabICL](https://github.com/soda-inria/tabicl) v2 | `make_tabicl_classifier()` / `make_tabicl_regressor` | `tabicl-v2` | any | median (default) or mean | included |
+| [LimiX](https://github.com/limix-ldm/LimiX) | `LimiXWrapperClassifier(predictor)` / `LimiXWrapperRegressor` | — | 10 | single value | separate ([example](examples/rdblearn_limix_example.py)) |
+| [TabFM 1.0.0](https://huggingface.co/google/tabfm-1.0.0-pytorch) | `TabFMWrapperClassifier()` / `TabFMWrapperRegressor` | — | 10 | single value | separate ([example](examples/rdblearn_tabfm_example.py)) |
+
+TabPFN, Kumo-Tabular and TabICL are built with RDBLearn's defaults (`TABPFN_DEFAULT_CONFIG`, `TABICL_DEFAULT_CONFIG`, 8 estimators, KV cache on so `predict` only processes the test rows), and keyword arguments override them. When a task has more classes than a model supports, `RDBLearnClassifier` falls back to base-10-hierarchical inference.
 
 ### `TaskMetadata`
 Data structure containing task-specific information.
@@ -159,41 +219,6 @@ Data structure containing task-specific information.
 - `time_col`: Optional[str]
 - `task_type`: Optional[str]
 - `evaluation_metric`: Optional[str]
-
-### LimiX Integration
-`rdblearn.utils` provides wrappers to adapt LimiX predictors into scikit-learn compatible estimators.
-
-- **`LimiXWrapperClassifier(predictor)`**: Wrapper for classification tasks.
-    - `predictor`: An initialized `LimiXPredictor` instance.
-    - `fit(X, y)`: Stores training data for in-context inference.
-    - `predict(X)`: Returns class labels.
-    - `predict_proba(X)`: Returns class probabilities.
-
-- **`LimiXWrapperRegressor(predictor)`**: Wrapper for regression tasks.
-    - `predictor`: An initialized `LimiXPredictor` instance.
-    - `fit(X, y)`: Stores training data.
-    - `predict(X)`: Returns predicted values.
-
-**Note**: You must install LimiX separately and provide an initialized `LimiXPredictor` to these wrappers.
-
-### TabFM Integration
-`rdblearn.utils` also provides wrappers for Google's **TabFM 1.0.0** (`google/tabfm-1.0.0-pytorch`), a 1.6B-parameter in-context tabular foundation model.
-
-- **`TabFMWrapperClassifier(checkpoint_path=None, device="cuda", n_estimators=8, max_num_features=None, chunk_size="auto", dtype="float32")`**: Wrapper for classification tasks (max 10 classes, an architectural TabFM limit).
-    - `checkpoint_path`: local directory holding the `classification/` + `regression/` subfolders of the HF repo; `None` downloads from Hugging Face.
-    - `chunk_size="auto"`: enables TabFM's activation chunking (off by default in `tabfm==1.0.0`) with a constant cells-per-chunk budget, so wide DFS feature sets fit on 32 GB GPUs without dropping features.
-    - `dtype="bfloat16"`: halves activation memory via an fp32↔bf16 IO adapter (bf16 is TabFM's upstream design dtype); use for very wide/deep feature sets.
-    - `fit(X, y)` / `predict(X)` / `predict_proba(X)`: standard scikit-learn contract.
-- **`TabFMWrapperRegressor(...)`**: same options, for regression. Note TabFM's regression head emits a single scalar per row — unlike TabPFN there is no predictive distribution (no median/quantiles).
-
-Install TabFM without disturbing the pinned torch build:
-
-```bash
-pip install "jaxtyping<0.3" "typeguard<3" absl-py safetensors
-pip install tabfm --no-deps
-```
-
-The HF repo ships `model.safetensors` only, while the `tabfm==1.0.0` wheel loads `pytorch_model.bin`; the wrapper converts once automatically on first use. See `examples/rdblearn_tabfm_example.py`.
 
 ---
 

@@ -16,7 +16,7 @@ class RDBLearnConfig(BaseModel):
     Configuration for RDBLearnEstimator.
     """
     # DFS Configuration (passed to fastdfs)
-    # If None, defaults to: {"max_depth": 2, "agg_primitives": ["max", "min", "mean", "count", "mode", "std"], "engine": "dfs2sql"}
+    # If None, defaults to: {"max_depth": 2, "agg_primitives": ["max", "min", "mean", "count", "mode", "std", "num_unique"], "engine": "dfs2sql"}
     dfs: Optional[DFSConfig] = None
     
     # Preprocessing Configuration (passed to AutoGluon feature generator)
@@ -32,6 +32,11 @@ class RDBLearnConfig(BaseModel):
     
     # Prediction Configuration
     predict_batch_size: int = 5000
+
+    # Point prediction requested from regressors that predict a distribution (TabPFN,
+    # TabICL, Kumo-Tabular): passed as `output_type` to base estimators whose `predict`
+    # takes that argument. None keeps each estimator's own default.
+    regression_output_type: Optional[str] = "median"
 
     # Temporal Difference Configuration (post-DFS transformation)
     temporal_diff: Optional[TemporalDiffConfig] = TemporalDiffConfig()
