@@ -187,6 +187,15 @@ class StandardPipeline:
         key_mappings: Dict[str, str],
         cutoff_time_column: Optional[str] = None,
     ):
+        """Run the sweep and the refit. One call is the supported use.
+
+        The refit session stays open on ``featurizer_`` for later ``predict`` and
+        ``score``. A second ``fit`` on the same object opens a new sweep session
+        before that session is closed. With the default temporary DuckDB file the
+        two sessions do not meet. With a shared ``dfs.engine_path`` the second open
+        fails (``Table already exists``). Close ``featurizer_`` at the start of
+        ``fit`` before treating a repeated ``fit`` as supported.
+        """
         factories = self._model_factories()
         max_hop = max(self.hops)
         self.target_col_ = target_col

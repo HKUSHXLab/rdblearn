@@ -11,8 +11,9 @@ from fastdfs.dfs import DFSSession
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 
 from rdblearn.config import RDBLearnConfig
-from rdblearn.constants import RDBLEARN_DEFAULT_CONFIG
+from rdblearn.constants import RDBLEARN_DEFAULT_CONFIG, TARGET_HISTORY_TABLE_NAME
 from rdblearn.estimator import RDBLearnClassifier, RDBLearnRegressor
+from rdblearn.featurizer import RDBFeaturizer
 from rdblearn.pipeline import StandardPipeline, planned_dfs_columns
 
 try:
@@ -183,24 +184,60 @@ class TestDFSSessionReuse(unittest.TestCase):
 
 
 class TestHopSelection(unittest.TestCase):
-    def test_hop_columns_from_deep_dfs_match_direct_dfs(self):
-        rdb, train, _, _ = make_relational_data()
-        X = train.drop(columns=["label"])
-        km = {"user_id": "users.user_id"}
+    def _prepared_rdb(self, rdb, train, key_mappings, augment):
+        """Database and training rows the featurizer hands to DFS, with augmentation on or off."""
+        config = RDBLearnConfig(**{
+            **RDBLEARN_DEFAULT_CONFIG,
+            "enable_target_augmentation": augment,
+            "dfs": {**RDBLEARN_DEFAULT_CONFIG["dfs"], "max_depth": 4},
+        })
+        featurizer = RDBFeaturizer(config, "classification")
+        X, _ = featurizer.fit_rdb(
+            train.drop(columns=["label"]), train["label"], rdb, key_mappings, "cutoff"
+        )
+        return featurizer.rdb_, X
 
+    def _assert_hop_slice_matches_direct_dfs(self, rdb, X, key_mappings):
         def cfg(depth):
             return DFSConfig(**{**RDBLEARN_DEFAULT_CONFIG["dfs"], "max_depth": depth})
 
-        deep = fastdfs.compute_dfs_features(rdb, X, key_mappings=km, cutoff_time_column="cutoff", config=cfg(4))
-        n_deep = len(deep.columns) - len(X.columns)
-        self.assertTrue(any("NUM_UNIQUE(" in c for c in deep.columns))
+        deep = fastdfs.compute_dfs_features(
+            rdb, X, key_mappings=key_mappings, cutoff_time_column="cutoff", config=cfg(4)
+        )
+        base = set(X.columns)
+        feature_cols = [c for c in deep.columns if c not in base]
+        self.assertTrue(any("NUM_UNIQUE(" in c for c in feature_cols))
+        planned_deep = set(planned_dfs_columns(rdb, X, key_mappings, "cutoff", cfg(4)))
+        self.assertEqual(sorted(c for c in feature_cols if c in planned_deep), sorted(feature_cols))
+
+        previous = 0
         for depth in (2, 3):
-            direct = fastdfs.compute_dfs_features(rdb, X, key_mappings=km, cutoff_time_column="cutoff", config=cfg(depth))
-            planned = set(planned_dfs_columns(rdb, X, km, "cutoff", cfg(depth)))
+            direct = fastdfs.compute_dfs_features(
+                rdb, X, key_mappings=key_mappings, cutoff_time_column="cutoff", config=cfg(depth)
+            )
+            planned = set(planned_dfs_columns(rdb, X, key_mappings, "cutoff", cfg(depth)))
             selected = [c for c in deep.columns if c in planned]
-            self.assertEqual(sorted(selected), sorted(set(direct.columns) - set(X.columns)))
-            self.assertLess(len(selected), n_deep)
+            self.assertEqual(sorted(selected), sorted(c for c in direct.columns if c not in base))
+            self.assertGreater(len(selected), previous)
+            self.assertLess(len(selected), len(feature_cols))
             pd.testing.assert_frame_equal(deep[selected], direct[selected], check_dtype=False)
+            previous = len(selected)
+        return deep
+
+    def test_hop_columns_match_direct_dfs_with_and_without_target_augmentation(self):
+        rdb, train, _, _ = make_relational_data()
+        km = {"user_id": "users.user_id"}
+        widths = {}
+        for augment in (False, True):
+            prepared, X = self._prepared_rdb(rdb, train, km, augment)
+            deep = self._assert_hop_slice_matches_direct_dfs(prepared, X, km)
+            history_columns = [c for c in deep.columns if TARGET_HISTORY_TABLE_NAME in c]
+            if augment:
+                self.assertGreater(len(history_columns), 0)
+            else:
+                self.assertEqual(history_columns, [])
+            widths[augment] = deep.shape[1]
+        self.assertGreater(widths[True], widths[False])
 
 
 class TestStandardPipeline(unittest.TestCase):
