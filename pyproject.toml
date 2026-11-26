@@ -60,6 +60,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Auto hurdle (regression) for the RelBench v1 / StandardPipeline recipe
+relbench = [
+    "tabpfn-extensions",
+]
 # Development dependencies
 dev = [
     "pytest>=7.0.0",

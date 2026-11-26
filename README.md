@@ -118,8 +118,9 @@ See `examples/` for more detailed usage.
 `StandardPipeline` picks the DFS depth (hop) and the foundation model on validation, then refits on train + validation:
 
 1. One DFS at depth `max(hops)` on train and validation, with target augmentation and temporal differences on.
-2. Every (hop, model) pair is scored on validation. A hop-`h` candidate uses exactly the columns a DFS with `max_depth=h` would produce, taken from the single deep DFS.
-3. The best pair is refit on train + validation. The refit keeps its own featurizer and fastdfs session (`pipeline.featurizer_`), because the target history now includes validation, and the chosen foundation model (`pipeline.model_`).
+2. Optional **hub** (peer completion) and **period** (multi-period SQL) extras are appended after DFS and kept for every hop.
+3. Every (hop, model) pair is scored on validation. A hop-`h` candidate uses exactly the columns a DFS with `max_depth=h` would produce, taken from the single deep DFS (extras stay).
+4. The best pair is refit on train + validation. The refit keeps its own featurizer and fastdfs session (`pipeline.featurizer_`), because the target history now includes validation, and the chosen foundation model (`pipeline.model_`).
 
 ```python
 from rdblearn import RDBDataset, StandardPipeline
@@ -131,12 +132,41 @@ md = task.metadata
 pipeline = StandardPipeline(
     task_type="classification",
     hops=(2, 3, 4),
-    models=("tabpfn-v3.5", "kumo-tabular-medium"),
+    models=("tabpfn-v3.5",),
+    hub=True,
+    period=True,
+    task_id="relbench::rel-trial::study-outcome",
+    text_encoder="tfidf",
+    context_strategy="hard_pool",
+    recency_window=800_000,
 )
-pipeline.fit(task.train_df, task.val_df, md.target_col, dataset.rdb, md.key_mappings, md.time_col)
+pipeline.fit(
+    task.train_df, task.val_df, md.target_col,
+    dataset.rdb, md.key_mappings, md.time_col,
+    task_id="relbench::rel-trial::study-outcome",
+)
 print(pipeline.results_)              # validation score per (hop, model)
 print(pipeline.score(task.test_df))   # test score of the refit model
 ```
+
+#### RelBench v1 recipe
+
+Default profile for RelBench entity tasks (flags mirror the kwargs):
+
+```bash
+python examples/rdblearn_standard_pipeline.py \
+  --dataset rel-f1 --task driver-dnf \
+  --hub --period --text-encoder tfidf \
+  --context-strategy hard_pool --recency-window 800000
+```
+
+| Knob | Default | Effect |
+|------|---------|--------|
+| `--hub` / `--no-hub` | on | Post-DFS hub completion (`MEAN` over peer paths; cap 256) |
+| `--period` / `--no-period` | on | Multi-period activity SQL when a RelBench `task_id` has a rule |
+| `--text-encoder tfidf\|none` | `tfidf` | Attach anchor free-text; TabPFN `TRANSFORM_TEXT` (no custom TF-IDF) |
+| `--context-strategy hard_pool\|random\|none` | `hard_pool` | Recency pool of size `M=recency_window`; bag `K=M/4`, 8 estimators |
+| `--hurdle auto\|none` | `auto` | Regression only: `AutoHurdleRegressor` with `zero_threshold=0.05` |
 
 See `examples/rdblearn_standard_pipeline.py`.
 
@@ -186,7 +216,7 @@ Scikit-learn compatible estimators for relational learning.
 ### `StandardPipeline`
 DFS-depth × foundation-model selection on validation, then refit on train + validation.
 
-- **`__init__(task_type, hops=(2, 3, 4), models=("tabpfn-v3.5", "kumo-tabular-medium"), metric=None, config=None, model_params=None)`**:
+- **`__init__(task_type, hops=(2, 3, 4), models=("tabpfn-v3.5",), metric=None, config=None, model_params=None, hub=False, period=False, task_id=None, text_encoder=None, context_strategy=None, recency_window=800_000, hurdle=None, hurdle_zero_threshold=0.05, seed=0)`**:
     - `task_type`: `"classification"` or `"regression"`.
     - `hops`: DFS depths to sweep. DFS runs once at `max(hops)`.
     - `models`: names from the `StandardPipeline` column of [Supported TFMs](#supported-tfms), or a dict of name → zero-argument estimator factory.
@@ -194,7 +224,12 @@ DFS-depth × foundation-model selection on validation, then refit on train + val
     - `config`: base `RDBLearnConfig`. Target augmentation and temporal differences are always on, and `dfs.max_depth` is set by the pipeline.
     - `model_params`: keyword overrides passed to every named model factory (e.g. `{"device": "cuda"}`).
     - `regression_output_type`: `"median"` or `"mean"` point prediction for regressors; `None` keeps `config.regression_output_type` (`"median"`). The median suits `mae`; prefer `"mean"` when selecting on `rmse` or `r2`.
-- **`fit(train_df, val_df, target_col, rdb, key_mappings, cutoff_time_column=None)`**: runs the sweep and the refit. One fastdfs session serves every hop and model in the sweep. The refit opens a second session, because its target history includes validation. Sets `results_` (validation score per hop and model), `best_` (the selected pair), `featurizer_` (the refit relational database and session) and `model_` (the refit foundation model). A candidate that runs out of memory gets a NaN score and an `error` entry in `results_`; if the refit of the best pair runs out of memory, the next best pair is refit instead.
+    - `hub` / `period`: append hub completion and/or multi-period SQL features after DFS (extras kept for every hop).
+    - `task_id`: RelBench id `relbench::{dataset}::{task}` for period rule lookup.
+    - `text_encoder`: `None` or `"tfidf"` (attach anchor text; enable TabPFN `TRANSFORM_TEXT`).
+    - `context_strategy`: `None` / `"random"` / `"hard_pool"`; with `hard_pool`, `recency_window` is pool size M (`K=M/4`, 8 estimators).
+    - `hurdle`: `None` or `"auto"` (regression only; uses `tabpfn_extensions` AutoHurdle).
+- **`fit(train_df, val_df, target_col, rdb, key_mappings, cutoff_time_column=None, task_id=None)`**: runs the sweep and the refit. One fastdfs session serves every hop and model in the sweep. The refit opens a second session, because its target history includes validation. Sets `results_` (validation score per hop and model), `best_` (the selected pair), `featurizer_` (the refit relational database and session) and `model_` (the refit foundation model). A candidate that runs out of memory gets a NaN score and an `error` entry in `results_`; if the refit of the best pair runs out of memory, the next best pair is refit instead.
 - **`predict(df)`**, **`predict_proba(df)`**, **`score(df)`**: run rows through `featurizer_` and then `model_`. `score` returns the pipeline metric on `df`.
 
 <a id="supported-tfms"></a>

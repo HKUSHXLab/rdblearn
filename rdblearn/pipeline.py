@@ -3,12 +3,15 @@
 1. Run DFS once at the deepest hop (``max(hops)``) on train and validation, with
    target-history augmentation and temporal-difference features on. The fastdfs
    session belongs to that featurizer, not to a model.
-2. Sweep every (hop, foundation model) pair on validation. A hop-``h`` candidate uses
-   exactly the columns a DFS with ``max_depth=h`` would produce, taken from the deep DFS.
-   Models are fit on the preprocessed frame directly.
-3. Refit the best pair on train + validation: a new featurizer (its own session, because
-   the target history now includes validation) and one model.
+2. Optionally append hub-completion and multi-period SQL features.
+3. Sweep every (hop, foundation model) pair on validation. A hop-``h`` candidate uses
+   exactly the columns a DFS with ``max_depth=h`` would produce, taken from the deep DFS,
+   plus any hub/period/text columns. Models are fit on the preprocessed frame directly
+   (optional hard_pool context / auto hurdle).
+4. Refit the best pair on train + validation.
 """
+from __future__ import annotations
+
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
@@ -21,16 +24,13 @@ from sklearn import metrics as skm
 
 from .config import RDBLearnConfig, TemporalDiffConfig
 from .constants import RDBLEARN_DEFAULT_CONFIG
+from .context import prepare_hard_pool_fit
 from .featurizer import RDBFeaturizer
 from .modeling import FittedModel
 from .preprocessing import TabularPreprocessor
+from .text import AnchorTextEncoder, merge_transform_text
 from .utils import TFM_FACTORIES
 
-# name -> (score function taking (y_true, prediction, classes), greater is better)
-# Regression metrics score the point prediction chosen by ``regression_output_type``
-# (median by default). The median minimises absolute error (``mae``); the mean minimises
-# squared error, so prefer ``regression_output_type="mean"`` when selecting on ``rmse``
-# or ``r2``.
 METRICS: Dict[str, Any] = {
     "roc_auc": (lambda y, p, classes: _roc_auc(y, p, classes), True),
     "accuracy": (lambda y, p, classes: skm.accuracy_score(y, classes[np.argmax(p, axis=1)]), True),
@@ -54,11 +54,7 @@ def planned_dfs_columns(
     cutoff_time_column: Optional[str],
     config: DFSConfig,
 ) -> List[str]:
-    """Names of the features DFS plans for ``config`` (no feature values are computed).
-
-    fastdfs may still drop planned features while computing, so intersect with the
-    computed columns.
-    """
+    """Names of the features DFS plans for ``config`` (no feature values are computed)."""
     engine = get_dfs_engine(config.engine, config)
     _, target = engine._prepare_target_for_engine(X, key_mappings, cutoff_time_column)
     features = engine.prepare_features(
@@ -70,37 +66,34 @@ def planned_dfs_columns(
 class StandardPipeline:
     """Hop x foundation-model sweep on validation, then refit of the best pair on train + val.
 
-    Args:
-        task_type: ``"classification"`` or ``"regression"``.
-        hops: DFS depths to sweep; DFS itself runs once at ``max(hops)``.
-        models: Names from ``rdblearn.utils.TFM_FACTORIES`` (e.g. ``"tabpfn-v3.5"``,
-            ``"kumo-tabular-medium"``, ``"tabicl-v2"``), or a dict of name ->
-            zero-argument estimator factory.
-        metric: Key of :data:`METRICS`; defaults to ``roc_auc`` / ``mae``.
-        config: Base ``RDBLearnConfig``. Target augmentation and temporal differences
-            are switched on and ``dfs.max_depth`` is set by the pipeline.
-        model_params: Keyword overrides passed to every named model factory (e.g. ``device``).
-        regression_output_type: Point prediction of regressors, ``"median"`` or ``"mean"``.
-            ``None`` keeps ``config.regression_output_type`` (``"median"`` by default).
+    Extra feature / model knobs (RelBench v1 recipe):
 
-    A candidate that runs out of memory is recorded with a NaN score and an ``error``
-    in ``results_``; if the best candidate runs out of memory during the refit, the
-    next best is refit instead.
-
-    After ``fit``, ``featurizer_`` holds the refit relational database and its fastdfs
-    session, and ``model_`` is the refit foundation model. ``predict`` runs new rows
-    through that featurizer and then the model.
+    - ``hub`` / ``period``: post-DFS peer completion and multi-period SQL features.
+    - ``text_encoder``: ``None`` or ``"tfidf"`` (TabPFN ``TRANSFORM_TEXT``, no custom TF-IDF).
+    - ``context_strategy``: ``None``/``"random"`` or ``"hard_pool"`` with ``recency_window``.
+    - ``hurdle``: ``None`` or ``"auto"`` (regression only).
     """
 
     def __init__(
         self,
         task_type: str,
         hops: Sequence[int] = (2, 3, 4),
-        models: Union[Sequence[str], Dict[str, Callable[[], Any]]] = ("tabpfn-v3.5", "kumo-tabular-medium"),
+        models: Union[Sequence[str], Dict[str, Callable[..., Any]]] = ("tabpfn-v3.5", "kumo-tabular-medium"),
         metric: Optional[str] = None,
         config: Optional[RDBLearnConfig] = None,
         model_params: Optional[Dict[str, Any]] = None,
         regression_output_type: Optional[str] = None,
+        *,
+        hub: bool = False,
+        period: bool = False,
+        task_id: Optional[str] = None,
+        max_peer_features: int = 256,
+        text_encoder: Optional[str] = None,
+        context_strategy: Optional[str] = None,
+        recency_window: int = 800_000,
+        hurdle: Optional[str] = None,
+        hurdle_zero_threshold: float = 0.05,
+        seed: int = 0,
     ):
         if task_type not in ("classification", "regression"):
             raise ValueError(f"task_type must be 'classification' or 'regression', got {task_type!r}")
@@ -108,6 +101,14 @@ class StandardPipeline:
             raise ValueError(
                 f"regression_output_type must be 'median', 'mean' or None, got {regression_output_type!r}"
             )
+        if text_encoder not in (None, "tfidf"):
+            raise ValueError(f"text_encoder must be None or 'tfidf', got {text_encoder!r}")
+        if context_strategy not in (None, "random", "hard_pool"):
+            raise ValueError(
+                f"context_strategy must be None, 'random', or 'hard_pool', got {context_strategy!r}"
+            )
+        if hurdle not in (None, "auto"):
+            raise ValueError(f"hurdle must be None or 'auto', got {hurdle!r}")
         self.regression_output_type = regression_output_type
         self.task_type = task_type
         self.hops = sorted(set(int(h) for h in hops))
@@ -117,18 +118,39 @@ class StandardPipeline:
             raise ValueError(f"Unknown metric {self.metric!r}; expected one of {sorted(METRICS)}")
         self.config = config
         self.model_params = model_params or {}
+        self.hub = bool(hub)
+        self.period = bool(period)
+        self.task_id = task_id
+        self.max_peer_features = int(max_peer_features)
+        self.text_encoder = text_encoder
+        self.context_strategy = context_strategy
+        self.recency_window = int(recency_window)
+        self.hurdle = hurdle
+        self.hurdle_zero_threshold = float(hurdle_zero_threshold)
+        self.seed = int(seed)
 
     # ------------------------------------------------------------------ helpers
 
-    def _model_factories(self) -> Dict[str, Callable[[], Any]]:
+    def _effective_model_params(self) -> Dict[str, Any]:
+        params = dict(self.model_params)
+        if self.text_encoder == "tfidf":
+            params = merge_transform_text(params)
+        return params
+
+    def _model_factories(self) -> Dict[str, Callable[..., Any]]:
+        params = self._effective_model_params()
         if isinstance(self.models, dict):
             return dict(self.models)
-        factories = {}
+        factories: Dict[str, Callable[..., Any]] = {}
         for name in self.models:
             if name not in TFM_FACTORIES:
                 raise ValueError(f"Unknown model {name!r}; expected one of {sorted(TFM_FACTORIES)}")
             make = TFM_FACTORIES[name][0 if self.task_type == "classification" else 1]
-            factories[name] = lambda make=make: make(**self.model_params)
+
+            def _factory(make=make, params=params, **extra):
+                return make(**{**params, **extra})
+
+            factories[name] = _factory
         return factories
 
     def _config_for_depth(self, depth: int) -> RDBLearnConfig:
@@ -144,9 +166,68 @@ class StandardPipeline:
         fn, _ = METRICS[self.metric]
         return float(fn(np.asarray(y), predictions, getattr(model, "classes_", None)))
 
+    def _append_hub(self, feats: pd.DataFrame, X: pd.DataFrame) -> pd.DataFrame:
+        if not self.hub:
+            return feats
+        from .hub_completion import append_hub_completion
+
+        out = append_hub_completion(
+            feats,
+            X,
+            self.cutoff_time_column_,
+            rdb=self.rdb_,
+            key_mappings=self.key_mappings_,
+            max_peer_features=self.max_peer_features,
+        )
+        logger.info("hub: cols {} -> {}", feats.shape[1], out.shape[1])
+        return out
+
+    def _append_period(self, feats: pd.DataFrame, X: pd.DataFrame) -> pd.DataFrame:
+        if not self.period:
+            return feats
+        if not self.task_id:
+            logger.warning("period=True but task_id is missing; skipping period features")
+            return feats
+        from .sql_extra_features import append_sql_features_for_task
+
+        try:
+            out = append_sql_features_for_task(
+                feats, X, self.task_id, cutoff_time_column=self.cutoff_time_column_
+            )
+        except Exception as e:
+            logger.warning("period: SKIP {}: {}", self.task_id, e)
+            return feats
+        logger.info("period: cols {} -> {}", feats.shape[1], out.shape[1])
+        return out
+
+    def _append_extras(self, feats: pd.DataFrame, X: pd.DataFrame) -> pd.DataFrame:
+        return self._append_period(self._append_hub(feats, X), X)
+
+    def _attach_text(self, feats: pd.DataFrame, X: pd.DataFrame) -> pd.DataFrame:
+        if self.text_encoder != "tfidf" or self.text_encoder_ is None:
+            return feats
+        return self.text_encoder_.transform(self.rdb_, feats, X)
+
     def _transformed(self, X: pd.DataFrame) -> pd.DataFrame:
         X_dfs = self.featurizer_.features_for_prediction(X, None, self.featurizer_.compute)
-        return self.featurizer_.transform(X_dfs)
+        X_dfs = self._append_extras(X_dfs, X)
+        # Preprocessor was fit without __raw_text columns; keep that split here.
+        wanted = [c for c in self.refit_feature_columns_ if not str(c).endswith("__raw_text")]
+        cols = [c for c in wanted if c in X_dfs.columns]
+        missing = [c for c in wanted if c not in X_dfs.columns]
+        frame = X_dfs[cols].copy()
+        for c in missing:
+            frame[c] = np.nan
+        frame = frame[wanted]
+        Xt = self.featurizer_.transform(frame)
+        with_text = self._attach_text(frame, X)
+        text_cols = [c for c in with_text.columns if c.endswith("__raw_text")]
+        if text_cols:
+            Xt = pd.concat(
+                [Xt.reset_index(drop=True), with_text[text_cols].reset_index(drop=True).astype("string")],
+                axis=1,
+            )
+        return Xt
 
     @staticmethod
     def _free_gpu_memory():
@@ -171,9 +252,69 @@ class StandardPipeline:
             pass
         return isinstance(error, RuntimeError) and "out of memory" in str(error).lower()
 
-    def _fit_model(self, make, config, X, y) -> FittedModel:
-        model = FittedModel(make(), self.task_type, config)
-        model.fit(X, y)
+    def _fit_model(
+        self,
+        make: Callable[..., Any],
+        config: RDBLearnConfig,
+        X: pd.DataFrame,
+        y,
+        *,
+        context_time: Optional[np.ndarray] = None,
+        model_name: Optional[str] = None,
+    ) -> FittedModel:
+        use_hurdle = (
+            self.hurdle == "auto"
+            and self.task_type == "regression"
+            and not isinstance(self.models, dict)
+        )
+        if use_hurdle:
+            from .hurdle import fit_auto_hurdle
+            from .utils import TFM_FACTORIES
+
+            # Named models only: need both clf and reg factories from the same family
+            name = model_name or "tabpfn-v3.5"
+            if name not in TFM_FACTORIES:
+                raise ValueError(f"hurdle='auto' needs a known TFM name, got {name!r}")
+            params = self._effective_model_params()
+            make_clf = TFM_FACTORIES[name][0]
+            make_reg = TFM_FACTORIES[name][1]
+            estimator = fit_auto_hurdle(
+                X,
+                y,
+                make_classifier=make_clf,
+                make_regressor=make_reg,
+                context_time=context_time,
+                context_strategy=self.context_strategy,
+                recency_window=self.recency_window,
+                seed=self.seed,
+                zero_threshold=self.hurdle_zero_threshold,
+                model_params=params,
+            )
+            model = FittedModel(estimator, self.task_type, config)
+            model.base_estimator = estimator
+            return model
+
+        overrides: Dict[str, Any] = {}
+        X_fit, y_fit = X, y
+        if self.context_strategy == "hard_pool":
+            X_fit, y_fit, overrides = prepare_hard_pool_fit(
+                X,
+                y,
+                context_time,
+                recency_window=self.recency_window,
+                seed=self.seed,
+            )
+        try:
+            estimator = make(**overrides) if overrides else make()
+        except TypeError:
+            # Zero-arg custom factories (tests)
+            if overrides:
+                logger.warning(
+                    "hard_pool overrides ignored for custom factory that accepts no kwargs"
+                )
+            estimator = make()
+        model = FittedModel(estimator, self.task_type, config)
+        model.fit(X_fit, y_fit)
         return model
 
     # ------------------------------------------------------------------ API
@@ -186,19 +327,18 @@ class StandardPipeline:
         rdb: RDB,
         key_mappings: Dict[str, str],
         cutoff_time_column: Optional[str] = None,
+        *,
+        task_id: Optional[str] = None,
     ):
-        """Run the sweep and the refit. One call is the supported use.
-
-        The refit session stays open on ``featurizer_`` for later ``predict`` and
-        ``score``. A second ``fit`` on the same object opens a new sweep session
-        before that session is closed. With the default temporary DuckDB file the
-        two sessions do not meet. With a shared ``dfs.engine_path`` the second open
-        fails (``Table already exists``). Close ``featurizer_`` at the start of
-        ``fit`` before treating a repeated ``fit`` as supported.
-        """
+        """Run the sweep and the refit. One call is the supported use."""
+        if task_id is not None:
+            self.task_id = task_id
         factories = self._model_factories()
         max_hop = max(self.hops)
         self.target_col_ = target_col
+        self.rdb_ = rdb
+        self.key_mappings_ = key_mappings
+        self.cutoff_time_column_ = cutoff_time_column
 
         # 1. One DFS at the deepest hop, shared by every candidate.
         t0 = time.perf_counter()
@@ -211,43 +351,97 @@ class StandardPipeline:
         D_val = featurizer.features_for_prediction(
             val_df.drop(columns=[target_col]), None, featurizer.compute
         )
+        X_val = val_df.drop(columns=[target_col])
         y_val = val_df[target_col]
-        featurizer.close()
-        self.dfs_seconds_ = time.perf_counter() - t0
 
         base_columns = [c for c in D_train.columns if c in X_train.columns]
         computed = set(D_train.columns) - set(base_columns)
-        self.hop_columns_ = {}
+        prepared_rdb = featurizer.rdb_
+        hop_dfs_columns: Dict[int, List[str]] = {}
         for hop in self.hops:
             planned = set(planned_dfs_columns(
-                featurizer.rdb_, X_train, key_mappings, cutoff_time_column,
+                prepared_rdb, X_train, key_mappings, cutoff_time_column,
                 self._config_for_depth(hop).dfs,
             ))
-            self.hop_columns_[hop] = base_columns + [c for c in D_train.columns if c in planned & computed]
+            hop_dfs_columns[hop] = base_columns + [
+                c for c in D_train.columns if c in planned & computed
+            ]
+
+        D_train = self._append_extras(D_train, X_train)
+        D_val = self._append_extras(D_val, X_val)
+
+        self.text_encoder_ = None
+        if self.text_encoder == "tfidf":
+            # Look up text on the original RDB — the featurizer's prepared copy may
+            # drop free-text columns that DFS does not use.
+            self.text_encoder_ = AnchorTextEncoder().fit(rdb, X_train, key_mappings)
+            D_train = self._attach_text(D_train, X_train)
+            D_val = self._attach_text(D_val, X_val)
+
+        extra_columns = [c for c in D_train.columns if c not in set(hop_dfs_columns[max_hop])]
+        self.extra_columns_ = extra_columns
+        self.hop_columns_ = {
+            hop: hop_dfs_columns[hop] + [c for c in extra_columns if c in D_train.columns]
+            for hop in self.hops
+        }
+
+        featurizer.close()
+        self.dfs_seconds_ = time.perf_counter() - t0
+
         logger.info(
-            f"DFS depth {max_hop}: {len(computed)} features in {self.dfs_seconds_:.1f}s; "
-            + ", ".join(f"hop {h}: {len(c) - len(base_columns)}" for h, c in self.hop_columns_.items())
+            f"DFS depth {max_hop}: {len(computed)} DFS features + {len(extra_columns)} extras "
+            f"in {self.dfs_seconds_:.1f}s; "
+            + ", ".join(
+                f"hop {h}: {len(hop_dfs_columns[h]) - len(base_columns)} dfs "
+                f"+ {len(extra_columns)} extras"
+                for h in self.hops
+            )
         )
 
-        # 2. Sweep (hop x model) on validation. The preprocessor depends on the hop's
-        #    columns, not on the model, so it is fit once per hop.
+        train_times = (
+            pd.to_datetime(X_train[cutoff_time_column]).to_numpy()
+            if cutoff_time_column and cutoff_time_column in X_train.columns
+            else None
+        )
+
+        # 2. Sweep (hop x model) on validation.
         rows = []
         for hop in self.hops:
-            cols = self.hop_columns_[hop]
+            cols = [c for c in self.hop_columns_[hop] if c in D_train.columns]
             config = self._config_for_depth(hop)
             preprocessor = TabularPreprocessor(
                 ag_config=config.ag_config,
                 temporal_diff_config=config.temporal_diff,
                 cutoff_time=cutoff_time_column,
             )
-            Xt_train = preprocessor.fit(D_train[cols]).transform(D_train[cols])
-            Xt_val = preprocessor.transform(D_val[cols])
+            # Preserve string text columns for TabPFN TRANSFORM_TEXT: temporarily
+            # exclude __raw_text from AG by transforming only non-text, then concat.
+            text_cols = [c for c in cols if c.endswith("__raw_text")]
+            model_cols = [c for c in cols if c not in text_cols]
+            Xt_train = preprocessor.fit(D_train[model_cols]).transform(D_train[model_cols])
+            Xt_val = preprocessor.transform(D_val[model_cols])
+            if text_cols:
+                Xt_train = pd.concat(
+                    [Xt_train.reset_index(drop=True), D_train[text_cols].reset_index(drop=True).astype("string")],
+                    axis=1,
+                )
+                Xt_val = pd.concat(
+                    [Xt_val.reset_index(drop=True), D_val[text_cols].reset_index(drop=True).astype("string")],
+                    axis=1,
+                )
             for name, make in factories.items():
                 t0 = time.perf_counter()
                 score, error = float("nan"), None
                 try:
-                    model = self._fit_model(make, config, Xt_train, y_train)
-                    predictions = model.predict_proba(Xt_val) if self.task_type == "classification" else model.predict(Xt_val)
+                    model = self._fit_model(
+                        make, config, Xt_train, y_train,
+                        context_time=train_times, model_name=name if not isinstance(self.models, dict) else None,
+                    )
+                    predictions = (
+                        model.predict_proba(Xt_val)
+                        if self.task_type == "classification"
+                        else model.predict(Xt_val)
+                    )
                     score = self._score(model, y_val, np.asarray(predictions))
                     logger.info(f"hop={hop} model={name}: val {self.metric}={score:.4f}")
                     del model
@@ -264,8 +458,7 @@ class StandardPipeline:
                 })
         self.results_ = pd.DataFrame(rows)
 
-        # 3. Refit the best (hop, model) on train + validation. The history table now
-        #    includes validation, so this is a new featurizer and a new session.
+        # 3. Refit the best (hop, model) on train + validation.
         _, greater_is_better = METRICS[self.metric]
         score_col = f"val_{self.metric}"
         ranked = self.results_.dropna(subset=[score_col]).sort_values(
@@ -288,8 +481,37 @@ class StandardPipeline:
                     train_val.drop(columns=[target_col]), train_val[target_col],
                     rdb, key_mappings, cutoff_time_column,
                 )
-                Xt = featurizer.fit_preprocessor(featurizer.compute(X))
-                model = self._fit_model(factories[best["model"]], config, Xt, y)
+                D = self._append_extras(featurizer.compute(X), X)
+                if self.text_encoder == "tfidf":
+                    self.text_encoder_ = AnchorTextEncoder().fit(rdb, X, key_mappings)
+                    D = self._attach_text(D, X)
+                cols = [c for c in self.hop_columns_[best["hop"]] if c in D.columns]
+                # Ensure all hop extras present
+                for c in self.hop_columns_[best["hop"]]:
+                    if c not in cols and c in D.columns:
+                        cols.append(c)
+                text_cols = [c for c in cols if c.endswith("__raw_text")]
+                model_cols = [c for c in cols if c not in text_cols]
+                Xt = featurizer.fit_preprocessor(D[model_cols])
+                if text_cols:
+                    Xt = pd.concat(
+                        [Xt.reset_index(drop=True), D[text_cols].reset_index(drop=True).astype("string")],
+                        axis=1,
+                    )
+                self.refit_feature_columns_ = list(cols)
+                refit_times = (
+                    pd.to_datetime(X[cutoff_time_column]).to_numpy()
+                    if cutoff_time_column and cutoff_time_column in X.columns
+                    else None
+                )
+                model = self._fit_model(
+                    factories[best["model"]],
+                    config,
+                    Xt,
+                    y,
+                    context_time=refit_times,
+                    model_name=best["model"] if not isinstance(self.models, dict) else None,
+                )
             except Exception as e:
                 if not self._is_out_of_memory(e):
                     featurizer.close()
