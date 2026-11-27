@@ -24,6 +24,7 @@ def test_make_tabpfn_versions(version):
     pytest.importorskip("tabpfn")
     for est in (make_tabpfn_classifier(version, device="cpu"), make_tabpfn_regressor(version, device="cpu")):
         assert est.fit_mode == "fit_with_cache"
+        assert est.kv_cache_precision == "auto"
         assert est.device == "cpu"
         assert est.n_estimators == TABPFN_DEFAULT_CONFIG["n_estimators"]
     expected = {

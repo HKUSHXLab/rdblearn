@@ -6,6 +6,9 @@ TABPFN_DEFAULT_CONFIG = {
     # Keep the training context's key/value cache from `fit` so `predict*` calls only run the
     # test rows; TabPFN's default "fit_preprocessors" re-encodes the training rows on every call.
     "fit_mode": "fit_with_cache",
+    # TabPFN-3/3.5 default kv_cache_precision is "int8" (lossy). Use "auto" to keep the
+    # computed dtype so cached inference matches the full-precision fit_preprocessors path.
+    "kv_cache_precision": "auto",
 }
 
 TABICL_DEFAULT_CONFIG = {
