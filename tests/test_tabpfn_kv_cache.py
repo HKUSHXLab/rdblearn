@@ -24,12 +24,15 @@ PREDICT_BATCH_SIZE = 10
 class TestTabPFNDefaultConfig(unittest.TestCase):
     def test_default_config_builds_kv_cache_in_fit(self):
         self.assertEqual(TABPFN_DEFAULT_CONFIG["fit_mode"], "fit_with_cache")
+        self.assertEqual(TABPFN_DEFAULT_CONFIG["kv_cache_precision"], "auto")
 
     @unittest.skipIf(TabPFNClassifier is None, "tabpfn is not installed")
     def test_default_config_is_accepted_by_tabpfn(self):
         for cls in (TabPFNClassifier, TabPFNRegressor):
             est = cls(**TABPFN_DEFAULT_CONFIG)
-            self.assertEqual(est.get_params()["fit_mode"], "fit_with_cache")
+            params = est.get_params()
+            self.assertEqual(params["fit_mode"], "fit_with_cache")
+            self.assertEqual(params["kv_cache_precision"], "auto")
 
 
 @unittest.skipIf(TabPFNClassifier is None, "tabpfn is not installed")

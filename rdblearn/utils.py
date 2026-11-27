@@ -343,8 +343,8 @@ def make_tabpfn_classifier(version: str = "v3.5", **overrides):
 
     ``version`` is one of :data:`TABPFN_VERSIONS`: ``"v3.5"`` is TabPFN-3.5 and
     ``"v3.5-fast"`` the smaller TabPFN-3.5-Fast. Defaults come from
-    ``TABPFN_DEFAULT_CONFIG`` (including ``fit_mode="fit_with_cache"``);
-    ``overrides`` take precedence.
+    ``TABPFN_DEFAULT_CONFIG`` (including ``fit_mode="fit_with_cache"`` and
+    lossless ``kv_cache_precision="auto"``); ``overrides`` take precedence.
     """
     return _make_tabpfn("classification", version, overrides)
 
